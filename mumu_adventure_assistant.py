@@ -1092,7 +1092,7 @@ def debug_ranges_for_step(
 
     if step == "train_levels":
         for x, label in TRAIN_LEVEL_CANDIDATES:
-            ranges.append((f"等级{label}", "#e879f9", (max(0, x - 45), 610, min(ADB_REF_WIDTH, x + 45), 765)))
+            ranges.append((f"等级{label}边框", "#e879f9", (max(0, x - 45), 623, min(ADB_REF_WIDTH, x + 45), 715)))
         ranges.append(("训练页按钮区", "#60a5fa", (360, 1060, 705, 1180)))
         return ranges
 
@@ -1477,27 +1477,56 @@ def building_train_action_visible(image: Image.Image) -> bool:
     return True
 
 
-def highest_available_level_x(image: Image.Image) -> int:
-    best_x = 305
+def train_level_border_boxes(x: int) -> dict[str, tuple[int, int, int, int]]:
+    return {
+        "top": (x - 35, 623, x + 35, 646),
+        "left": (x - 45, 645, x - 27, 715),
+        "right": (x + 27, 645, x + 45, 715),
+        "upper": (x - 42, 623, x + 42, 690),
+    }
+
+
+def train_level_border_white_pixel(red: int, green: int, blue: int) -> bool:
+    return red >= 205 and green >= 205 and blue >= 210
+
+
+def train_level_border_glow_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        120 <= red <= 225
+        and 150 <= green <= 245
+        and 180 <= blue <= 255
+        and blue >= red + 5
+        and green >= red - 20
+    )
+
+
+def train_level_border_gray_pixel(red: int, green: int, blue: int) -> bool:
+    return 85 <= red <= 185 and 85 <= green <= 185 and 85 <= blue <= 185 and max(red, green, blue) - min(red, green, blue) <= 48
+
+
+def train_level_available(image: Image.Image, x: int) -> bool:
+    boxes = train_level_border_boxes(x)
+    top_white = adb_box_ratio(image, boxes["top"], train_level_border_white_pixel)
+    top_glow = adb_box_ratio(image, boxes["top"], train_level_border_glow_pixel)
+    left_white = adb_box_ratio(image, boxes["left"], train_level_border_white_pixel)
+    left_glow = adb_box_ratio(image, boxes["left"], train_level_border_glow_pixel)
+    right_white = adb_box_ratio(image, boxes["right"], train_level_border_white_pixel)
+    right_glow = adb_box_ratio(image, boxes["right"], train_level_border_glow_pixel)
+    upper_gray = adb_box_ratio(image, boxes["upper"], train_level_border_gray_pixel)
+
+    light_score = max(top_white, top_glow, left_white, left_glow, right_white, right_glow)
+    return light_score >= 0.09 and upper_gray < 0.36
+
+
+def highest_available_level_x(image: Image.Image) -> int | None:
+    if main_screen_visible(image) or queue_panel_visible(image):
+        return None
+
+    best_x: int | None = None
     for x, _label in TRAIN_LEVEL_CANDIDATES:
         if x > 690:
             continue
-        box = adb_box(max(0, x - 45), 610, min(720, x + 45), 765)
-        color_density = box_density(
-            image,
-            box,
-            lambda r, g, b: max(r, g, b) - min(r, g, b) >= 45 and not (r < 80 and g < 80 and b < 80),
-        )
-        white_density = box_density(image, box, lambda r, g, b: r >= 210 and g >= 215 and b >= 220)
-        gray_density = box_density(
-            image,
-            box,
-            lambda r, g, b: abs(r - g) <= 25 and abs(g - b) <= 25 and 45 <= r <= 185,
-        )
-        is_available = (white_density >= 0.04 or color_density >= 0.28) and not (
-            gray_density >= 0.55 and white_density < 0.03
-        )
-        if is_available:
+        if train_level_available(image, x):
             best_x = x
     return best_x
 
@@ -2618,6 +2647,9 @@ class MultiPanelApp:
 
         self.show_debug_step(window, "train_levels")
         level_x = highest_available_level_x(image)
+        if level_x is None:
+            self.thread_log(window, "未识别到白色边框的可训练等级，停止训练任务。")
+            return False
         self.thread_log(window, f"选择最高可用等级，x={level_x}。")
         tap_point(window, level_x, 675)
         if not self.sleep_with_stop(window, 0.25):
