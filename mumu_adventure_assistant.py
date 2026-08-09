@@ -1649,6 +1649,12 @@ def highest_available_level_x(image: Image.Image) -> int | None:
     return best_x
 
 
+def available_train_level_xs(image: Image.Image) -> list[int]:
+    if not soldier_page_visible(image):
+        return []
+    return [x for x, _label in TRAIN_LEVEL_CANDIDATES if x <= 690 and train_level_available(image, x)]
+
+
 def save_debug_capture(image: Image.Image, prefix: str) -> Path:
     DEBUG_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
@@ -2194,7 +2200,7 @@ class TargetPanel:
         tasks.columnconfigure(1, weight=1)
 
         for index, (task_key, task_label) in enumerate(TASK_DEFINITIONS):
-            var = tk.BooleanVar(master=self.top, value=True)
+            var = tk.BooleanVar(master=self.top, value=(task_key != "adventure"))
             check = tk.Checkbutton(
                 tasks,
                 text=task_label,
@@ -2773,14 +2779,33 @@ class MultiPanelApp:
             self.thread_log(window, f"已在 {unit_label} 训练页。")
 
         self.show_debug_step(window, "train_levels")
-        level_x = highest_available_level_x(image)
-        if level_x is None:
-            self.thread_log(window, "未识别到白色边框的可训练等级，停止训练任务。")
-            return False
-        self.thread_log(window, f"选择最高可用等级，x={level_x}。")
-        tap_point(window, level_x, 675)
-        if not self.sleep_with_stop(window, 0.25):
-            self.thread_log(window, "任务已停止。")
+        level_choices = list(reversed(available_train_level_xs(image)))
+        selected_level_x: int | None = None
+        if not level_choices and soldier_quantity_bar_visible(image):
+            self.thread_log(window, "未识别到更高白框等级，沿用当前已出现数量条的等级。")
+            selected_level_x = -1
+
+        for level_x in level_choices:
+            if self.should_stop(window):
+                self.thread_log(window, "任务已停止。")
+                return False
+
+            self.thread_log(window, f"尝试选择可训练等级，x={level_x}。")
+            tap_point(window, level_x, 675)
+            if not self.sleep_with_stop(window, 0.35):
+                self.thread_log(window, "任务已停止。")
+                return False
+
+            image, _profile = capture_target(window)
+            if soldier_quantity_bar_visible(image):
+                selected_level_x = level_x
+                self.thread_log(window, f"已验证等级 x={level_x} 出现绿色数量条。")
+                break
+
+            self.thread_log(window, f"等级 x={level_x} 未出现绿色数量条，视为不可训练，尝试低一级。")
+
+        if selected_level_x is None:
+            self.thread_log(window, "未找到出现绿色数量条的可训练等级，停止训练任务。")
             return False
 
         training_started = False
