@@ -175,6 +175,7 @@ SW_RESTORE = 9
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 HWND_TOPMOST = wintypes.HWND(-1)
+HWND_NOTOPMOST = wintypes.HWND(-2)
 SWP_NOACTIVATE = 0x0010
 GWL_EXSTYLE = -20
 WS_EX_TRANSPARENT = 0x00000020
@@ -1231,7 +1232,7 @@ class App:
         self.root = tk.Tk()
         self.root.title("MuMu 探险助手")
         self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
+        self.root.attributes("-topmost", False)
         self.root.configure(bg="#1f2937")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -1475,7 +1476,7 @@ class App:
             hwnd = int(user32.GetAncestor(int(self.root.winfo_id()), GA_ROOT))
         if not hwnd:
             hwnd = int(self.root.winfo_id())
-        user32.SetWindowPos(hwnd, HWND_TOPMOST, left, top, width, height, SWP_NOACTIVATE)
+        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, left, top, width, height, SWP_NOACTIVATE)
 
     def selected_window(self) -> TargetWindow | None:
         label = self.target_var.get()
@@ -1692,7 +1693,7 @@ class TargetPanel:
         self.top = tk.Toplevel(root)
         self.top.title(f"MuMu 探险助手 {window.hwnd:X}")
         self.top.overrideredirect(True)
-        self.top.attributes("-topmost", True)
+        self.top.attributes("-topmost", False)
         self.top.configure(bg="#1f2937")
         self.top.protocol("WM_DELETE_WINDOW", app.close)
 
@@ -1873,7 +1874,7 @@ class TargetPanel:
             hwnd = int(user32.GetAncestor(int(self.top.winfo_id()), GA_ROOT))
         if not hwnd:
             hwnd = int(self.top.winfo_id())
-        user32.SetWindowPos(hwnd, HWND_TOPMOST, left, top, width, height, SWP_NOACTIVATE)
+        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, left, top, width, height, SWP_NOACTIVATE)
 
     def log(self, text: str) -> None:
         now = datetime.now().strftime("%H:%M:%S")
