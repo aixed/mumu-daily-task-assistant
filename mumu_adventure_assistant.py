@@ -163,6 +163,12 @@ POPUP_CLAIM_GREEN_BLOCKS = [
     (310, 900, 410, 960),
 ]
 
+BUILDING_ACTION_SCAN_BOX = (120, 690, 610, 990)
+BUILDING_ACTION_MIN_AREA = 3400
+BUILDING_ACTION_MAX_AREA = 7600
+BUILDING_ACTION_MIN_WHITE_RATIO = 0.045
+BUILDING_ACTION_MIN_BLUE_RATIO = 0.22
+
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -998,6 +1004,15 @@ def relative_box_to_adb(box: tuple[float, float, float, float]) -> tuple[int, in
 DebugRange = tuple[str, str, tuple[int, int, int, int]]
 
 
+@dataclass(frozen=True)
+class BuildingActionCandidate:
+    center: tuple[int, int]
+    box: tuple[int, int, int, int]
+    area: int
+    white_ratio: float
+    blue_ratio: float
+
+
 def debug_ranges_for_step(
     step: str,
     unit_label: str = "",
@@ -1053,7 +1068,7 @@ def debug_ranges_for_step(
         ]
 
     if step == "building_train":
-        return [("兵营训练入口", "#fb7185", (430, 790, 545, 925))]
+        return [("训练按钮扫描区", "#fb7185", BUILDING_ACTION_SCAN_BOX)]
 
     if step == "soldier_page":
         return [
@@ -1180,18 +1195,153 @@ def soldier_training_started_visible(image: Image.Image) -> bool:
     return soldier_page_visible(image) and panel_density >= 0.25
 
 
-def building_train_action_visible(image: Image.Image) -> bool:
-    if queue_panel_visible(image) or soldier_page_visible(image):
-        return False
-    train_density = box_density(
-        image,
-        adb_box(430, 790, 545, 925),
-        lambda r, g, b: 35 <= r <= 150
-        and 90 <= g <= 220
-        and 130 <= b <= 255
-        and b >= r + 40,
+def building_action_blue_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        55 <= red <= 140
+        and 105 <= green <= 190
+        and 165 <= blue <= 245
+        and blue >= red + 60
+        and blue >= green + 18
+        and green >= red + 8
     )
-    return train_density >= 0.15
+
+
+def action_icon_white_pixel(red: int, green: int, blue: int) -> bool:
+    return red >= 205 and green >= 205 and blue >= 210 and max(red, green, blue) - min(red, green, blue) <= 65
+
+
+def image_point_to_adb(image: Image.Image, x: int, y: int) -> tuple[int, int]:
+    width, height = image.size
+    adb_x = max(0, min(ADB_REF_WIDTH - 1, round(x * ADB_REF_WIDTH / width)))
+    adb_y = max(0, min(ADB_REF_HEIGHT - 1, round(y * ADB_REF_HEIGHT / height)))
+    return adb_x, adb_y
+
+
+def building_action_candidates(image: Image.Image) -> list[BuildingActionCandidate]:
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+
+    left, top, right, bottom = adb_box_to_image(image, BUILDING_ACTION_SCAN_BOX)
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        return []
+
+    pixels = image.load()
+    mask = bytearray(width * height)
+    for y in range(height):
+        row_offset = y * width
+        for x in range(width):
+            if building_action_blue_pixel(*pixels[left + x, top + y]):
+                mask[row_offset + x] = 1
+
+    seen = bytearray(width * height)
+    candidates: list[BuildingActionCandidate] = []
+    image_width, image_height = image.size
+    area_scale = (ADB_REF_WIDTH * ADB_REF_HEIGHT) / (image_width * image_height)
+    pad_x = max(2, round(14 * image_width / ADB_REF_WIDTH))
+    pad_y = max(2, round(14 * image_height / ADB_REF_HEIGHT))
+
+    for start_y in range(height):
+        for start_x in range(width):
+            start_index = start_y * width + start_x
+            if not mask[start_index] or seen[start_index]:
+                continue
+
+            queue = [(start_x, start_y)]
+            seen[start_index] = 1
+            cursor = 0
+            count = 0
+            min_x = max_x = start_x
+            min_y = max_y = start_y
+
+            while cursor < len(queue):
+                current_x, current_y = queue[cursor]
+                cursor += 1
+                count += 1
+                min_x = min(min_x, current_x)
+                max_x = max(max_x, current_x)
+                min_y = min(min_y, current_y)
+                max_y = max(max_y, current_y)
+
+                for next_y in range(current_y - 1, current_y + 2):
+                    if next_y < 0 or next_y >= height:
+                        continue
+                    for next_x in range(current_x - 1, current_x + 2):
+                        if next_x < 0 or next_x >= width or (next_x == current_x and next_y == current_y):
+                            continue
+                        next_index = next_y * width + next_x
+                        if mask[next_index] and not seen[next_index]:
+                            seen[next_index] = 1
+                            queue.append((next_x, next_y))
+
+            adb_area = round(count * area_scale)
+            comp_left, comp_top = image_point_to_adb(image, left + min_x, top + min_y)
+            comp_right, comp_bottom = image_point_to_adb(image, left + max_x + 1, top + max_y + 1)
+            comp_width = comp_right - comp_left
+            comp_height = comp_bottom - comp_top
+
+            if not (
+                BUILDING_ACTION_MIN_AREA <= adb_area <= BUILDING_ACTION_MAX_AREA
+                and 78 <= comp_width <= 122
+                and 74 <= comp_height <= 112
+            ):
+                continue
+
+            sample_left = max(0, left + min_x - pad_x)
+            sample_top = max(0, top + min_y - pad_y)
+            sample_right = min(image_width, left + max_x + 1 + pad_x)
+            sample_bottom = min(image_height, top + max_y + 1 + pad_y)
+            sample_total = max(1, (sample_right - sample_left) * (sample_bottom - sample_top))
+            white_hits = 0
+            blue_hits = 0
+            for sample_y in range(sample_top, sample_bottom):
+                for sample_x in range(sample_left, sample_right):
+                    red, green, blue = pixels[sample_x, sample_y]
+                    if action_icon_white_pixel(red, green, blue):
+                        white_hits += 1
+                    if building_action_blue_pixel(red, green, blue):
+                        blue_hits += 1
+
+            white_ratio = white_hits / sample_total
+            blue_ratio = blue_hits / sample_total
+            if white_ratio < BUILDING_ACTION_MIN_WHITE_RATIO or blue_ratio < BUILDING_ACTION_MIN_BLUE_RATIO:
+                continue
+
+            center_x, center_y = image_point_to_adb(
+                image,
+                left + (min_x + max_x + 1) // 2,
+                top + (min_y + max_y + 1) // 2,
+            )
+            candidates.append(
+                BuildingActionCandidate(
+                    center=(center_x, center_y),
+                    box=(comp_left, comp_top, comp_right, comp_bottom),
+                    area=adb_area,
+                    white_ratio=white_ratio,
+                    blue_ratio=blue_ratio,
+                )
+            )
+
+    return candidates
+
+
+def find_building_train_action(image: Image.Image) -> tuple[int, int] | None:
+    if queue_panel_visible(image) or soldier_page_visible(image) or not main_screen_visible(image):
+        return None
+
+    candidates = building_action_candidates(image)
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda candidate: (candidate.center[0], candidate.white_ratio, candidate.area))
+    return best.center
+
+
+def building_train_action_visible(image: Image.Image) -> bool:
+    if find_building_train_action(image) is None:
+        return False
+    return True
 
 
 def highest_available_level_x(image: Image.Image) -> int:
@@ -2261,58 +2411,74 @@ class MultiPanelApp:
 
         self.thread_log(window, f"点击 {unit_label} 行。")
         tap_point(window, 400, row_y)
+
+        def training_entry_context_visible(candidate_image: Image.Image) -> bool:
+            if queue_panel_visible(candidate_image):
+                return False
+            return soldier_page_visible(candidate_image) or main_screen_visible(candidate_image)
+
         ok, image = self.wait_for_image(
             window,
-            lambda img: not queue_panel_visible(img) or soldier_page_visible(img),
-            f"{unit_label} 已响应点击。",
-            f"{unit_label} 点击后未验证到界面变化，停止训练任务。",
+            training_entry_context_visible,
+            f"{unit_label} 已进入训练入口场景。",
+            f"{unit_label} 点击后未验证到训练入口场景，停止训练任务。",
             attempts=10,
         )
         if not ok:
             return False
 
-        self.thread_log(window, "点击两次兵营建筑以清除手势指引。")
-        tap_target(window, "soldier_building")
-        if not self.sleep_with_stop(window, 0.25):
-            self.thread_log(window, "任务已停止。")
-            return False
-        tap_target(window, "soldier_building")
-
-        image, _profile = capture_target(window)
         if not soldier_page_visible(image):
-            train_icon_ok = False
-            for attempt in range(1, 6):
+            train_action_center: tuple[int, int] | None = None
+            for attempt in range(6):
                 if self.should_stop(window):
                     self.thread_log(window, "任务已停止。")
                     return False
                 self.show_debug_step(window, "building_train")
                 image, _profile = capture_target(window)
-                if building_train_action_visible(image):
-                    self.thread_log(window, "已验证到建筑训练入口。")
-                    train_icon_ok = True
+
+                if soldier_page_visible(image):
+                    self.thread_log(window, f"已在 {unit_label} 训练页。")
                     break
-                self.thread_log(window, f"未出现训练图标，第 {attempt}/5 次点击兵营建筑。")
+
+                if not main_screen_visible(image):
+                    self.thread_log(window, "未停留在主城训练入口场景，停止训练任务。")
+                    return False
+
+                train_action_center = find_building_train_action(image)
+                if train_action_center is not None:
+                    self.thread_log(
+                        window,
+                        f"已验证到建筑训练图标，坐标=({train_action_center[0]}, {train_action_center[1]})。",
+                    )
+                    break
+
+                if attempt >= 5:
+                    break
+
+                self.thread_log(window, f"未识别到训练图标，第 {attempt + 1}/5 次点击兵营建筑。")
                 tap_target(window, "soldier_building")
                 if not self.sleep_with_stop(window, 0.45):
                     self.thread_log(window, "任务已停止。")
                     return False
 
-            if not train_icon_ok:
+            if soldier_page_visible(image):
+                pass
+            elif train_action_center is None:
                 self.thread_log(window, "多次点击兵营建筑后仍未出现训练图标，停止训练任务。")
                 return False
-
-            self.thread_log(window, "点击建筑训练按钮。")
-            tap_target(window, "building_train")
-            self.show_debug_step(window, "soldier_page")
-            ok, image = self.wait_for_image(
-                window,
-                soldier_page_visible,
-                f"已进入 {unit_label} 训练页。",
-                f"未进入 {unit_label} 训练页，停止训练任务。",
-                attempts=14,
-            )
-            if not ok:
-                return False
+            else:
+                self.thread_log(window, "点击已识别到的建筑训练图标。")
+                tap_point(window, train_action_center[0], train_action_center[1])
+                self.show_debug_step(window, "soldier_page")
+                ok, image = self.wait_for_image(
+                    window,
+                    soldier_page_visible,
+                    f"已进入 {unit_label} 训练页。",
+                    f"未进入 {unit_label} 训练页，停止训练任务。",
+                    attempts=14,
+                )
+                if not ok:
+                    return False
         else:
             self.thread_log(window, f"已在 {unit_label} 训练页。")
 
