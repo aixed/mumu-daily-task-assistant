@@ -168,6 +168,14 @@ BUILDING_ACTION_MIN_AREA = 3400
 BUILDING_ACTION_MAX_AREA = 7600
 BUILDING_ACTION_MIN_WHITE_RATIO = 0.045
 BUILDING_ACTION_MIN_BLUE_RATIO = 0.22
+BUILDING_GUIDE_HAND_SCAN_BOX = (380, 630, 680, 950)
+
+SOLDIER_PAGE_BACK_BLOCK = (0, 0, 90, 90)
+SOLDIER_SELECTED_TAB_BLOCK = (20, 1170, 240, 1278)
+SOLDIER_SPEAR_TAB_BLOCK = (250, 1180, 468, 1278)
+SOLDIER_ARCHER_TAB_BLOCK = (470, 1180, 695, 1278)
+SOLDIER_BOTTOM_BUTTON_BLOCK = (20, 1060, 700, 1165)
+SOLDIER_QUEUE_ROW_TAP_X = 250
 
 
 user32 = ctypes.windll.user32
@@ -1068,12 +1076,18 @@ def debug_ranges_for_step(
         ]
 
     if step == "building_train":
-        return [("训练按钮扫描区", "#fb7185", BUILDING_ACTION_SCAN_BOX)]
+        return [
+            ("训练按钮扫描区", "#fb7185", BUILDING_ACTION_SCAN_BOX),
+            ("手势扫描区", "#f59e0b", BUILDING_GUIDE_HAND_SCAN_BOX),
+        ]
 
     if step == "soldier_page":
         return [
-            ("训练页按钮区", "#60a5fa", (360, 1060, 705, 1180)),
-            ("训练中面板", "#60a5fa", (50, 815, 680, 1045)),
+            ("训练页返回", "#60a5fa", SOLDIER_PAGE_BACK_BLOCK),
+            ("盾兵营标签", "#60a5fa", SOLDIER_SELECTED_TAB_BLOCK),
+            ("矛兵营标签", "#60a5fa", SOLDIER_SPEAR_TAB_BLOCK),
+            ("射手营标签", "#60a5fa", SOLDIER_ARCHER_TAB_BLOCK),
+            ("训练页按钮区", "#60a5fa", SOLDIER_BOTTOM_BUTTON_BLOCK),
         ]
 
     if step == "train_levels":
@@ -1163,24 +1177,46 @@ def unit_row_state(image: Image.Image, row_y: int) -> str:
     return "unknown"
 
 
+def soldier_tab_selected_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        red >= 175
+        and green >= 195
+        and blue >= 205
+        and blue >= red - 10
+        and blue >= green - 30
+    )
+
+
+def soldier_tab_blue_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        65 <= red <= 150
+        and 100 <= green <= 195
+        and 145 <= blue <= 245
+        and blue >= red + 40
+        and blue >= green + 5
+    )
+
+
+def soldier_button_pixel(red: int, green: int, blue: int) -> bool:
+    yellow_button = red >= 190 and 105 <= green <= 195 and blue <= 95 and red >= green + 25
+    blue_button = soldier_tab_blue_pixel(red, green, blue)
+    return yellow_button or blue_button
+
+
 def soldier_page_visible(image: Image.Image) -> bool:
-    sky_density = box_density(
-        image,
-        adb_box(0, 0, 720, 575),
-        lambda r, g, b: 70 <= r <= 190
-        and 120 <= g <= 225
-        and 145 <= b <= 250
-        and b >= r + 15,
+    back_ratio = adb_box_ratio(image, SOLDIER_PAGE_BACK_BLOCK, icon_white_pixel)
+    selected_tab_ratio = adb_box_ratio(image, SOLDIER_SELECTED_TAB_BLOCK, soldier_tab_selected_pixel)
+    spear_tab_ratio = adb_box_ratio(image, SOLDIER_SPEAR_TAB_BLOCK, soldier_tab_blue_pixel)
+    archer_tab_ratio = adb_box_ratio(image, SOLDIER_ARCHER_TAB_BLOCK, soldier_tab_blue_pixel)
+    button_ratio = adb_box_ratio(image, SOLDIER_BOTTOM_BUTTON_BLOCK, soldier_button_pixel)
+
+    return (
+        back_ratio >= 0.030
+        and selected_tab_ratio >= 0.45
+        and spear_tab_ratio >= 0.45
+        and archer_tab_ratio >= 0.42
+        and button_ratio >= 0.22
     )
-    button_density = box_density(
-        image,
-        adb_box(360, 1060, 705, 1180),
-        lambda r, g, b: 40 <= r <= 150
-        and 90 <= g <= 220
-        and 130 <= b <= 255
-        and b >= r + 40,
-    )
-    return sky_density >= 0.45 and button_density >= 0.25
 
 
 def soldier_training_started_visible(image: Image.Image) -> bool:
@@ -1210,11 +1246,104 @@ def action_icon_white_pixel(red: int, green: int, blue: int) -> bool:
     return red >= 205 and green >= 205 and blue >= 210 and max(red, green, blue) - min(red, green, blue) <= 65
 
 
+def guide_hand_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        145 <= red <= 245
+        and 85 <= green <= 190
+        and 45 <= blue <= 155
+        and red >= green + 25
+        and green >= blue + 5
+    )
+
+
 def image_point_to_adb(image: Image.Image, x: int, y: int) -> tuple[int, int]:
     width, height = image.size
     adb_x = max(0, min(ADB_REF_WIDTH - 1, round(x * ADB_REF_WIDTH / width)))
     adb_y = max(0, min(ADB_REF_HEIGHT - 1, round(y * ADB_REF_HEIGHT / height)))
     return adb_x, adb_y
+
+
+def find_guided_building_train_action(image: Image.Image) -> tuple[int, int] | None:
+    if queue_panel_visible(image) or soldier_page_visible(image) or not main_screen_visible(image):
+        return None
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+
+    left, top, right, bottom = adb_box_to_image(image, BUILDING_GUIDE_HAND_SCAN_BOX)
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        return None
+
+    pixels = image.load()
+    mask = bytearray(width * height)
+    for y in range(height):
+        row_offset = y * width
+        for x in range(width):
+            if guide_hand_pixel(*pixels[left + x, top + y]):
+                mask[row_offset + x] = 1
+
+    seen = bytearray(width * height)
+    image_width, image_height = image.size
+    area_scale = (ADB_REF_WIDTH * ADB_REF_HEIGHT) / (image_width * image_height)
+    best: tuple[int, tuple[int, int, int, int]] | None = None
+
+    for start_y in range(height):
+        for start_x in range(width):
+            start_index = start_y * width + start_x
+            if not mask[start_index] or seen[start_index]:
+                continue
+
+            queue = [(start_x, start_y)]
+            seen[start_index] = 1
+            cursor = 0
+            count = 0
+            min_x = max_x = start_x
+            min_y = max_y = start_y
+
+            while cursor < len(queue):
+                current_x, current_y = queue[cursor]
+                cursor += 1
+                count += 1
+                min_x = min(min_x, current_x)
+                max_x = max(max_x, current_x)
+                min_y = min(min_y, current_y)
+                max_y = max(max_y, current_y)
+
+                for next_y in range(current_y - 1, current_y + 2):
+                    if next_y < 0 or next_y >= height:
+                        continue
+                    for next_x in range(current_x - 1, current_x + 2):
+                        if next_x < 0 or next_x >= width or (next_x == current_x and next_y == current_y):
+                            continue
+                        next_index = next_y * width + next_x
+                        if mask[next_index] and not seen[next_index]:
+                            seen[next_index] = 1
+                            queue.append((next_x, next_y))
+
+            adb_area = round(count * area_scale)
+            comp_left, comp_top = image_point_to_adb(image, left + min_x, top + min_y)
+            comp_right, comp_bottom = image_point_to_adb(image, left + max_x + 1, top + max_y + 1)
+            comp_width = comp_right - comp_left
+            comp_height = comp_bottom - comp_top
+
+            if not (2500 <= adb_area <= 12000 and 55 <= comp_width <= 150 and 85 <= comp_height <= 210):
+                continue
+            if best is None or adb_area > best[0]:
+                best = (adb_area, (comp_left, comp_top, comp_right, comp_bottom))
+
+    if best is None:
+        return None
+
+    _area, (comp_left, _comp_top, comp_right, comp_bottom) = best
+    comp_width = comp_right - comp_left
+    comp_height = comp_bottom - _comp_top
+    target_x = comp_left + round(comp_width * 0.18)
+    target_y = min(comp_bottom + round(comp_height * 0.22), 870)
+    target_y = max(target_y, _comp_top + round(comp_height * 0.75))
+    target_x = max(BUILDING_ACTION_SCAN_BOX[0], min(BUILDING_ACTION_SCAN_BOX[2], target_x))
+    target_y = max(BUILDING_ACTION_SCAN_BOX[1], min(BUILDING_ACTION_SCAN_BOX[3], target_y))
+    return target_x, target_y
 
 
 def building_action_candidates(image: Image.Image) -> list[BuildingActionCandidate]:
@@ -1329,6 +1458,10 @@ def building_action_candidates(image: Image.Image) -> list[BuildingActionCandida
 def find_building_train_action(image: Image.Image) -> tuple[int, int] | None:
     if queue_panel_visible(image) or soldier_page_visible(image) or not main_screen_visible(image):
         return None
+
+    guided_action = find_guided_building_train_action(image)
+    if guided_action is not None:
+        return guided_action
 
     candidates = building_action_candidates(image)
     if not candidates:
@@ -1813,9 +1946,10 @@ class DebugRangeOverlay:
             width = 2 if (x2 - x1) >= 12 and (y2 - y1) >= 12 else 1
             self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=width)
             if x2 - x1 >= 34 and y2 - y1 >= 16:
+                label_y = y1 - 15 if y1 >= 18 else y2 + 3
                 self.canvas.create_text(
                     x1 + 3,
-                    y1 + 2,
+                    label_y,
                     text=label,
                     fill=color,
                     anchor="nw",
@@ -2410,7 +2544,7 @@ class MultiPanelApp:
             return True
 
         self.thread_log(window, f"点击 {unit_label} 行。")
-        tap_point(window, 400, row_y)
+        tap_point(window, SOLDIER_QUEUE_ROW_TAP_X, row_y)
 
         def training_entry_context_visible(candidate_image: Image.Image) -> bool:
             if queue_panel_visible(candidate_image):
