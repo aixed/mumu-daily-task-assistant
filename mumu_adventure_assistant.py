@@ -175,6 +175,7 @@ SOLDIER_SELECTED_TAB_BLOCK = (20, 1170, 240, 1278)
 SOLDIER_SPEAR_TAB_BLOCK = (250, 1180, 468, 1278)
 SOLDIER_ARCHER_TAB_BLOCK = (470, 1180, 695, 1278)
 SOLDIER_BOTTOM_BUTTON_BLOCK = (20, 1060, 700, 1165)
+SOLDIER_QUANTITY_BAR_BLOCK = (95, 955, 440, 1000)
 SOLDIER_QUEUE_ROW_TAP_X = 250
 
 
@@ -1087,12 +1088,14 @@ def debug_ranges_for_step(
             ("盾兵营标签", "#60a5fa", SOLDIER_SELECTED_TAB_BLOCK),
             ("矛兵营标签", "#60a5fa", SOLDIER_SPEAR_TAB_BLOCK),
             ("射手营标签", "#60a5fa", SOLDIER_ARCHER_TAB_BLOCK),
+            ("数量条", "#22c55e", SOLDIER_QUANTITY_BAR_BLOCK),
             ("训练页按钮区", "#60a5fa", SOLDIER_BOTTOM_BUTTON_BLOCK),
         ]
 
     if step == "train_levels":
         for x, label in TRAIN_LEVEL_CANDIDATES:
             ranges.append((f"等级{label}边框", "#e879f9", (max(0, x - 45), 623, min(ADB_REF_WIDTH, x + 45), 715)))
+        ranges.append(("数量条", "#22c55e", SOLDIER_QUANTITY_BAR_BLOCK))
         ranges.append(("训练页按钮区", "#60a5fa", (360, 1060, 705, 1180)))
         return ranges
 
@@ -1217,6 +1220,16 @@ def soldier_button_pixel(red: int, green: int, blue: int) -> bool:
     return yellow_button or blue_button
 
 
+def soldier_quantity_bar_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        35 <= red <= 115
+        and 170 <= green <= 255
+        and 35 <= blue <= 135
+        and green >= red + 70
+        and green >= blue + 60
+    )
+
+
 def soldier_page_visible(image: Image.Image) -> bool:
     back_ratio = adb_box_ratio(image, SOLDIER_PAGE_BACK_BLOCK, icon_white_pixel)
     selected_tab_ratio = adb_box_ratio(image, SOLDIER_SELECTED_TAB_BLOCK, soldier_tab_selected_pixel)
@@ -1233,6 +1246,10 @@ def soldier_page_visible(image: Image.Image) -> bool:
     )
 
 
+def soldier_quantity_bar_visible(image: Image.Image) -> bool:
+    return adb_box_ratio(image, SOLDIER_QUANTITY_BAR_BLOCK, soldier_quantity_bar_pixel) >= 0.12
+
+
 def soldier_training_started_visible(image: Image.Image) -> bool:
     panel_density = box_density(
         image,
@@ -1242,7 +1259,7 @@ def soldier_training_started_visible(image: Image.Image) -> bool:
         and 120 <= b <= 220
         and b >= r + 55,
     )
-    return soldier_page_visible(image) and panel_density >= 0.25
+    return soldier_page_visible(image) and (not soldier_quantity_bar_visible(image) or panel_density >= 0.25)
 
 
 def building_action_blue_pixel(red: int, green: int, blue: int) -> bool:
@@ -2684,8 +2701,8 @@ class MultiPanelApp:
         ok, image = self.wait_for_image(
             window,
             soldier_training_started_visible,
-            f"{unit_label} 已开始训练。",
-            f"{unit_label} 点击训练后未验证到训练中状态，停止训练任务。",
+            f"{unit_label} 数量条已消失，已开始训练。",
+            f"{unit_label} 点击训练后数量条仍未消失，停止训练任务。",
             attempts=16,
         )
         if not ok:
