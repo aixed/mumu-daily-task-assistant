@@ -8,7 +8,9 @@
 python mumu_adventure_assistant.py
 ```
 
-也可以双击 `run_mumu_adventure_assistant.bat`。
+也可以双击 `run_mumu_adventure_assistant.bat`。这个脚本会先检测 Python 3.10+、pip 和依赖，缺失时会尝试自动安装 Python 与 `requirements.txt` 中的依赖，然后启动程序。
+
+只想检测部署环境但不启动程序时，可以运行 `run_mumu_adventure_assistant.bat --check`。
 
 ## 功能
 
@@ -33,7 +35,7 @@ python mumu_adventure_assistant.py
   - 进入训练页后选择最高可用等级，点击训练，再返回。
 - 每一步点击后都会验证页面状态，验证失败会停止当前任务。
 - 多个勾选任务会按顺序执行，任务间保留 3 秒缓冲；完成的任务文字会变绿。
-- 每个面板提供“显示取色范围”调试开关，会在对应模拟器画面上显示本窗口使用的图形取色区域。
+- 每个面板提供“显示取色范围”调试开关，会在对应模拟器画面上显示当前步骤正在使用的图形取色区域。
 - “停止”按钮会向所有正在执行的窗口任务发送停止信号。
 - 如果任务开始时不在主城界面，会先尝试点击左上角返回；主城判断使用左上小箭头和右下城镇/野外切换图标的图形特征。
 

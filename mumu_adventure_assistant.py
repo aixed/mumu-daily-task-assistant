@@ -360,7 +360,9 @@ def get_emulator_content_rect(hwnd: int) -> Rect | None:
     content_width = max(1, round(ADB_REF_WIDTH * scale))
     content_height = max(1, round(ADB_REF_HEIGHT * scale))
     left = client.left + round((client.width - content_width) / 2)
-    top = client.top + round((client.height - content_height) / 2)
+    # MuMu's client area includes its top toolbar, while ADB screenshots start at
+    # the Android game surface. The game surface is aligned to the bottom.
+    top = client.bottom - content_height
     return Rect(left, top, left + content_width, top + content_height)
 
 
@@ -992,46 +994,77 @@ def relative_box_to_adb(box: tuple[float, float, float, float]) -> tuple[int, in
     )
 
 
-def debug_range_definitions() -> list[tuple[str, str, tuple[int, int, int, int]]]:
+DebugRange = tuple[str, str, tuple[int, int, int, int]]
+
+
+def debug_ranges_for_step(
+    step: str,
+    unit_label: str = "",
+    row_y: int | None = None,
+) -> list[DebugRange]:
     ranges: list[tuple[str, str, tuple[int, int, int, int]]] = []
 
-    for index, box in enumerate(EXPLORE_NAV_BLOCKS, start=1):
-        ranges.append((f"探险底色{index}", "#38bdf8", box))
-    for index, box in enumerate(EXPLORE_SWORD_BLOCKS, start=1):
-        ranges.append((f"双剑白边{index}", "#facc15", box))
-
-    for index, box in enumerate(ADVENTURE_HEADER_BLOCKS, start=1):
-        ranges.append((f"探险页头{index}", "#fde047", box))
-    ranges.append(("探险返回", "#fde047", ADVENTURE_BACK_BLOCK))
-    for index, box in enumerate(ADVENTURE_ACTION_BUTTON_BLOCKS, start=1):
-        ranges.append((f"探险按钮{index}", "#f97316", box))
-    for index, box in enumerate(ADVENTURE_STAGE_MARKER_BLOCKS, start=1):
-        ranges.append((f"探险节点{index}", "#fb923c", box))
-    ranges.append(("探险宝箱", "#fb923c", ADVENTURE_CHEST_BLOCK))
-
-    for index, box in enumerate(SIDE_CLAIM_GREEN_BLOCKS, start=1):
-        ranges.append((f"侧边领取{index}", "#22c55e", box))
-    for index, box in enumerate(POPUP_CLAIM_GREEN_BLOCKS, start=1):
-        ranges.append((f"弹窗领取{index}", "#16a34a", box))
-
-    ranges.extend(
-        [
-            ("奖励弹层", "#06b6d4", relative_box_to_adb(ADB_REWARD_OVERLAY_BOX)),
+    if step == "home":
+        return [
             ("主界面返回", "#a78bfa", (0, 95, 75, 155)),
             ("主城切换图标", "#f59e0b", MAIN_CITY_TOGGLE_ICON_BLOCK),
-            ("队列面板", "#8b5cf6", (0, 220, 445, 885)),
-            ("兵营训练入口", "#fb7185", (430, 790, 545, 925)),
+        ]
+
+    if step == "explore_entry":
+        for index, box in enumerate(EXPLORE_NAV_BLOCKS, start=1):
+            ranges.append((f"探险底色{index}", "#38bdf8", box))
+        for index, box in enumerate(EXPLORE_SWORD_BLOCKS, start=1):
+            ranges.append((f"双剑白边{index}", "#facc15", box))
+        return ranges
+
+    if step == "adventure_page":
+        for index, box in enumerate(ADVENTURE_HEADER_BLOCKS, start=1):
+            ranges.append((f"探险页头{index}", "#fde047", box))
+        ranges.append(("探险返回", "#fde047", ADVENTURE_BACK_BLOCK))
+        for index, box in enumerate(ADVENTURE_ACTION_BUTTON_BLOCKS, start=1):
+            ranges.append((f"探险按钮{index}", "#f97316", box))
+        for index, box in enumerate(ADVENTURE_STAGE_MARKER_BLOCKS, start=1):
+            ranges.append((f"探险节点{index}", "#fb923c", box))
+        ranges.append(("探险宝箱", "#fb923c", ADVENTURE_CHEST_BLOCK))
+        return ranges
+
+    if step == "side_claim":
+        return [(f"侧边领取{index}", "#22c55e", box) for index, box in enumerate(SIDE_CLAIM_GREEN_BLOCKS, start=1)]
+
+    if step == "popup_claim":
+        return [(f"弹窗领取{index}", "#16a34a", box) for index, box in enumerate(POPUP_CLAIM_GREEN_BLOCKS, start=1)]
+
+    if step == "reward":
+        return [("奖励弹层", "#06b6d4", relative_box_to_adb(ADB_REWARD_OVERLAY_BOX))]
+
+    if step == "queue_panel":
+        ranges.append(("队列面板", "#8b5cf6", (0, 220, 445, 885)))
+        for _unit_key, label, y in TRAIN_UNITS:
+            ranges.append((f"{label}状态", "#c084fc", (375, y - 34, 430, y + 34)))
+            ranges.append((f"{label}倒计时", "#c084fc", (75, y - 24, 370, y + 24)))
+        return ranges
+
+    if step == "unit_row" and row_y is not None:
+        label = unit_label or "士兵"
+        return [
+            (f"{label}状态", "#c084fc", (375, row_y - 34, 430, row_y + 34)),
+            (f"{label}倒计时", "#c084fc", (75, row_y - 24, 370, row_y + 24)),
+        ]
+
+    if step == "building_train":
+        return [("兵营训练入口", "#fb7185", (430, 790, 545, 925))]
+
+    if step == "soldier_page":
+        return [
             ("训练页按钮区", "#60a5fa", (360, 1060, 705, 1180)),
             ("训练中面板", "#60a5fa", (50, 815, 680, 1045)),
         ]
-    )
 
-    for _unit_key, unit_label, row_y in TRAIN_UNITS:
-        ranges.append((f"{unit_label}状态", "#c084fc", (375, row_y - 34, 430, row_y + 34)))
-        ranges.append((f"{unit_label}倒计时", "#c084fc", (75, row_y - 24, 370, row_y + 24)))
-
-    for x, label in TRAIN_LEVEL_CANDIDATES:
-        ranges.append((f"等级{label}", "#e879f9", (max(0, x - 45), 610, min(ADB_REF_WIDTH, x + 45), 765)))
+    if step == "train_levels":
+        for x, label in TRAIN_LEVEL_CANDIDATES:
+            ranges.append((f"等级{label}", "#e879f9", (max(0, x - 45), 610, min(ADB_REF_WIDTH, x + 45), 765)))
+        ranges.append(("训练页按钮区", "#60a5fa", (360, 1060, 705, 1180)))
+        return ranges
 
     return ranges
 
@@ -1049,7 +1082,8 @@ def queue_panel_visible(image: Image.Image) -> bool:
         and 65 <= b <= 140
         and b >= r + 30,
     )
-    return density >= 0.35
+    known_rows = sum(1 for _unit_key, _unit_label, row_y in TRAIN_UNITS if unit_row_state(image, row_y) != "unknown")
+    return density >= 0.35 and known_rows >= 2
 
 
 def main_return_icon_visible(image: Image.Image) -> bool:
@@ -1571,6 +1605,7 @@ class App:
 class DebugRangeOverlay:
     def __init__(self, root: tk.Tk, window: TargetWindow) -> None:
         self.window = window
+        self.ranges: list[DebugRange] = debug_ranges_for_step("home")
         self.top = tk.Toplevel(root)
         self.top.withdraw()
         self.top.overrideredirect(True)
@@ -1593,6 +1628,10 @@ class DebugRangeOverlay:
         self.window = window
         self.refresh()
 
+    def set_ranges(self, ranges: list[DebugRange]) -> None:
+        self.ranges = ranges
+        self.refresh()
+
     def refresh(self) -> None:
         if not is_alive_window(self.window.hwnd):
             self.top.withdraw()
@@ -1613,7 +1652,7 @@ class DebugRangeOverlay:
 
         self.canvas.configure(width=rect.width, height=rect.height)
         self.canvas.delete("all")
-        for label, color, box in debug_range_definitions():
+        for label, color, box in self.ranges:
             x1 = round(box[0] * rect.width / ADB_REF_WIDTH)
             y1 = round(box[1] * rect.height / ADB_REF_HEIGHT)
             x2 = round(box[2] * rect.width / ADB_REF_WIDTH)
@@ -1648,6 +1687,7 @@ class TargetPanel:
         self.debug_ranges_var = tk.BooleanVar(master=root, value=False)
         self.debug_check: tk.Checkbutton | None = None
         self.debug_overlay: DebugRangeOverlay | None = None
+        self.debug_ranges: list[DebugRange] = debug_ranges_for_step("home")
 
         self.top = tk.Toplevel(root)
         self.top.title(f"MuMu 探险助手 {window.hwnd:X}")
@@ -1850,11 +1890,17 @@ class TargetPanel:
         if self.debug_ranges_var.get():
             if self.debug_overlay is None:
                 self.debug_overlay = DebugRangeOverlay(self.top, self.window)
+            self.debug_overlay.set_ranges(self.debug_ranges)
             self.debug_overlay.refresh()
             self.log("已显示取色范围。")
             return
         self.hide_debug_overlay()
         self.log("已隐藏取色范围。")
+
+    def show_debug_ranges(self, ranges: list[DebugRange]) -> None:
+        self.debug_ranges = ranges
+        if self.debug_overlay is not None and self.debug_ranges_var.get():
+            self.debug_overlay.set_ranges(ranges)
 
     def refresh_debug_overlay(self) -> None:
         if self.debug_overlay is not None and self.debug_ranges_var.get():
@@ -1972,6 +2018,22 @@ class MultiPanelApp:
 
         self.root.after(0, _log)
 
+    def show_debug_step(
+        self,
+        window: TargetWindow,
+        step: str,
+        unit_label: str = "",
+        row_y: int | None = None,
+    ) -> None:
+        ranges = debug_ranges_for_step(step, unit_label=unit_label, row_y=row_y)
+
+        def _show() -> None:
+            panel = self.panels.get(window.hwnd)
+            if panel:
+                panel.show_debug_ranges(ranges)
+
+        self.root.after(0, _show)
+
     def should_stop(self, window: TargetWindow) -> bool:
         event = self.stop_events.get(window.hwnd)
         return bool(event and event.is_set())
@@ -2023,6 +2085,7 @@ class MultiPanelApp:
         finally:
             self.workers.pop(window.hwnd, None)
             self.stop_events.pop(window.hwnd, None)
+            self.show_debug_step(window, "home")
             self.root.after(0, lambda hwnd=window.hwnd: self.set_panel_busy(hwnd, False))
 
     def set_panel_busy(self, hwnd: int, busy: bool) -> None:
@@ -2092,8 +2155,10 @@ class MultiPanelApp:
             self.thread_log(window, "任务已停止。")
             return False
 
+        self.show_debug_step(window, "home")
         image, profile, detection = self.capture_detection(window)
         if detection.reward_overlay_visible:
+            self.show_debug_step(window, "reward")
             self.thread_log(window, "当前在奖励页，先点空白处退出。")
             tap_target(window, "reward_blank")
             ok, _image = self.wait_for_image(
@@ -2110,6 +2175,7 @@ class MultiPanelApp:
                 self.thread_log(window, "任务已停止。")
                 return False
 
+            self.show_debug_step(window, "home")
             image, profile, detection = self.capture_detection(window)
             if main_screen_visible(image) and not detection.adventure_page_visible and not detection.reward_overlay_visible:
                 if attempt > 0:
@@ -2137,6 +2203,7 @@ class MultiPanelApp:
             self.thread_log(window, "任务已停止。")
             return False
 
+        self.show_debug_step(window, "queue_panel")
         image, _profile = capture_target(window)
         if queue_panel_visible(image):
             return True
@@ -2178,6 +2245,7 @@ class MultiPanelApp:
         if not self.ensure_queue_panel(window):
             return False
 
+        self.show_debug_step(window, "unit_row", unit_label=unit_label, row_y=row_y)
         image, _profile = capture_target(window)
         state = unit_row_state(image, row_y)
         state_text = {"ready": "已完成", "idle": "空闲中", "busy": "训练中", "unknown": "未知"}.get(state, state)
@@ -2216,6 +2284,7 @@ class MultiPanelApp:
                 if self.should_stop(window):
                     self.thread_log(window, "任务已停止。")
                     return False
+                self.show_debug_step(window, "building_train")
                 image, _profile = capture_target(window)
                 if building_train_action_visible(image):
                     self.thread_log(window, "已验证到建筑训练入口。")
@@ -2233,6 +2302,7 @@ class MultiPanelApp:
 
             self.thread_log(window, "点击建筑训练按钮。")
             tap_target(window, "building_train")
+            self.show_debug_step(window, "soldier_page")
             ok, image = self.wait_for_image(
                 window,
                 soldier_page_visible,
@@ -2245,6 +2315,7 @@ class MultiPanelApp:
         else:
             self.thread_log(window, f"已在 {unit_label} 训练页。")
 
+        self.show_debug_step(window, "train_levels")
         level_x = highest_available_level_x(image)
         self.thread_log(window, f"选择最高可用等级，x={level_x}。")
         tap_point(window, level_x, 675)
@@ -2288,6 +2359,7 @@ class MultiPanelApp:
 
         backend = f"ADB {window.adb_serial}" if window.adb_serial else "窗口截图"
         self.thread_log(window, f"使用 {backend} 检测。")
+        self.show_debug_step(window, "explore_entry")
         image, profile, detection = self.capture_detection(window)
 
         if not detection.adventure_page_visible:
@@ -2297,6 +2369,7 @@ class MultiPanelApp:
 
             self.thread_log(window, "识别到探险/双剑入口，点击进入。")
             tap_target(window, "explore")
+            self.show_debug_step(window, "adventure_page")
             ok, image, profile, detection = self.wait_for(
                 window,
                 lambda d: d.adventure_page_visible,
@@ -2308,6 +2381,7 @@ class MultiPanelApp:
         else:
             self.thread_log(window, "当前已在探险页。")
 
+        self.show_debug_step(window, "side_claim")
         if not detection.side_claim_green:
             self.thread_log(
                 window,
@@ -2324,6 +2398,7 @@ class MultiPanelApp:
 
         self.thread_log(window, "领取按钮为绿色，点击第一次领取。")
         tap_target(window, "side_claim")
+        self.show_debug_step(window, "popup_claim")
         ok, image, profile, detection = self.wait_for(
             window,
             lambda d: d.popup_claim_green,
@@ -2335,6 +2410,7 @@ class MultiPanelApp:
 
         self.thread_log(window, "点击弹窗第二次领取。")
         tap_target(window, "popup_claim")
+        self.show_debug_step(window, "reward")
         ok, image, profile, detection = self.wait_for(
             window,
             lambda d: d.reward_overlay_visible,
