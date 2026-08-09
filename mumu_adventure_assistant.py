@@ -1149,11 +1149,23 @@ def main_screen_visible(image: Image.Image) -> bool:
     return main_return_icon_visible(image) and main_city_toggle_visible(image)
 
 
+def unit_upgrade_blocked_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        160 <= red <= 255
+        and 70 <= green <= 185
+        and blue <= 115
+        and red >= green + 35
+        and green >= blue + 15
+    )
+
+
 def unit_row_state(image: Image.Image, row_y: int) -> str:
     action_box = adb_box(375, row_y - 34, 430, row_y + 34)
     progress_box = adb_box(75, row_y - 24, 370, row_y + 24)
+    status_text_box = adb_box(155, row_y - 26, 355, row_y + 28)
 
     black_density = box_density(image, progress_box, lambda r, g, b: r <= 45 and g <= 50 and b <= 60)
+    upgrade_density = box_density(image, status_text_box, unit_upgrade_blocked_pixel)
     green_density = box_density(
         image,
         action_box,
@@ -1170,6 +1182,8 @@ def unit_row_state(image: Image.Image, row_y: int) -> str:
 
     if black_density >= 0.16:
         return "busy"
+    if upgrade_density >= 0.025:
+        return "blocked"
     if green_density >= 0.12:
         return "ready"
     if blue_density >= 0.12:
@@ -2562,11 +2576,20 @@ class MultiPanelApp:
         self.show_debug_step(window, "unit_row", unit_label=unit_label, row_y=row_y)
         image, _profile = capture_target(window)
         state = unit_row_state(image, row_y)
-        state_text = {"ready": "已完成", "idle": "空闲中", "busy": "训练中", "unknown": "未知"}.get(state, state)
+        state_text = {
+            "ready": "已完成",
+            "idle": "空闲中",
+            "busy": "训练中",
+            "blocked": "建筑升级中",
+            "unknown": "未知",
+        }.get(state, state)
         self.thread_log(window, f"{unit_label} 当前状态：{state_text}。")
 
         if state == "busy":
             self.thread_log(window, f"{unit_label} 正在训练，跳过。")
+            return True
+        if state == "blocked":
+            self.thread_log(window, f"{unit_label} 建筑升级中，跳过。")
             return True
         if state not in {"ready", "idle"}:
             self.thread_log(window, f"{unit_label} 状态无法确认，跳过。")
