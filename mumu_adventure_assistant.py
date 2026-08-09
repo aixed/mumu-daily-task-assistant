@@ -176,6 +176,8 @@ SOLDIER_SPEAR_TAB_BLOCK = (250, 1180, 468, 1278)
 SOLDIER_ARCHER_TAB_BLOCK = (470, 1180, 695, 1278)
 SOLDIER_BOTTOM_BUTTON_BLOCK = (20, 1060, 700, 1165)
 SOLDIER_QUANTITY_BAR_BLOCK = (95, 955, 440, 1000)
+SOLDIER_TRAIN_BUTTON_BLOCK = (360, 1060, 705, 1180)
+SOLDIER_TRAIN_GUIDE_HAND_SCAN_BOX = (360, 850, 700, 1165)
 SOLDIER_QUEUE_ROW_TAP_X = 250
 
 
@@ -1089,14 +1091,16 @@ def debug_ranges_for_step(
             ("矛兵营标签", "#60a5fa", SOLDIER_SPEAR_TAB_BLOCK),
             ("射手营标签", "#60a5fa", SOLDIER_ARCHER_TAB_BLOCK),
             ("数量条", "#22c55e", SOLDIER_QUANTITY_BAR_BLOCK),
-            ("训练页按钮区", "#60a5fa", SOLDIER_BOTTOM_BUTTON_BLOCK),
+            ("训练按钮手势", "#f59e0b", SOLDIER_TRAIN_GUIDE_HAND_SCAN_BOX),
+            ("训练按钮区", "#60a5fa", SOLDIER_TRAIN_BUTTON_BLOCK),
         ]
 
     if step == "train_levels":
         for x, label in TRAIN_LEVEL_CANDIDATES:
             ranges.append((f"等级{label}边框", "#e879f9", (max(0, x - 45), 623, min(ADB_REF_WIDTH, x + 45), 715)))
         ranges.append(("数量条", "#22c55e", SOLDIER_QUANTITY_BAR_BLOCK))
-        ranges.append(("训练页按钮区", "#60a5fa", (360, 1060, 705, 1180)))
+        ranges.append(("训练按钮手势", "#f59e0b", SOLDIER_TRAIN_GUIDE_HAND_SCAN_BOX))
+        ranges.append(("训练按钮区", "#60a5fa", SOLDIER_TRAIN_BUTTON_BLOCK))
         return ranges
 
     return ranges
@@ -1232,16 +1236,17 @@ def soldier_quantity_bar_pixel(red: int, green: int, blue: int) -> bool:
 
 def soldier_page_visible(image: Image.Image) -> bool:
     back_ratio = adb_box_ratio(image, SOLDIER_PAGE_BACK_BLOCK, icon_white_pixel)
-    selected_tab_ratio = adb_box_ratio(image, SOLDIER_SELECTED_TAB_BLOCK, soldier_tab_selected_pixel)
-    spear_tab_ratio = adb_box_ratio(image, SOLDIER_SPEAR_TAB_BLOCK, soldier_tab_blue_pixel)
-    archer_tab_ratio = adb_box_ratio(image, SOLDIER_ARCHER_TAB_BLOCK, soldier_tab_blue_pixel)
+    tab_blocks = [SOLDIER_SELECTED_TAB_BLOCK, SOLDIER_SPEAR_TAB_BLOCK, SOLDIER_ARCHER_TAB_BLOCK]
+    selected_ratios = [adb_box_ratio(image, box, soldier_tab_selected_pixel) for box in tab_blocks]
+    blue_ratios = [adb_box_ratio(image, box, soldier_tab_blue_pixel) for box in tab_blocks]
+    selected_tab_count = sum(1 for ratio in selected_ratios if ratio >= 0.35)
+    visible_tab_count = sum(1 for selected, blue in zip(selected_ratios, blue_ratios) if selected >= 0.35 or blue >= 0.35)
     button_ratio = adb_box_ratio(image, SOLDIER_BOTTOM_BUTTON_BLOCK, soldier_button_pixel)
 
     return (
         back_ratio >= 0.030
-        and selected_tab_ratio >= 0.45
-        and spear_tab_ratio >= 0.45
-        and archer_tab_ratio >= 0.42
+        and selected_tab_count >= 1
+        and visible_tab_count >= 3
         and button_ratio >= 0.22
     )
 
@@ -1374,6 +1379,88 @@ def find_guided_building_train_action(image: Image.Image) -> tuple[int, int] | N
     target_y = max(target_y, _comp_top + round(comp_height * 0.75))
     target_x = max(BUILDING_ACTION_SCAN_BOX[0], min(BUILDING_ACTION_SCAN_BOX[2], target_x))
     target_y = max(BUILDING_ACTION_SCAN_BOX[1], min(BUILDING_ACTION_SCAN_BOX[3], target_y))
+    return target_x, target_y
+
+
+def find_guided_soldier_train_button(image: Image.Image) -> tuple[int, int] | None:
+    if not soldier_page_visible(image) or not soldier_quantity_bar_visible(image):
+        return None
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+
+    left, top, right, bottom = adb_box_to_image(image, SOLDIER_TRAIN_GUIDE_HAND_SCAN_BOX)
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        return None
+
+    pixels = image.load()
+    mask = bytearray(width * height)
+    for y in range(height):
+        row_offset = y * width
+        for x in range(width):
+            if guide_hand_pixel(*pixels[left + x, top + y]):
+                mask[row_offset + x] = 1
+
+    seen = bytearray(width * height)
+    image_width, image_height = image.size
+    area_scale = (ADB_REF_WIDTH * ADB_REF_HEIGHT) / (image_width * image_height)
+    best: tuple[int, tuple[int, int, int, int]] | None = None
+
+    for start_y in range(height):
+        for start_x in range(width):
+            start_index = start_y * width + start_x
+            if not mask[start_index] or seen[start_index]:
+                continue
+
+            queue = [(start_x, start_y)]
+            seen[start_index] = 1
+            cursor = 0
+            count = 0
+            min_x = max_x = start_x
+            min_y = max_y = start_y
+
+            while cursor < len(queue):
+                current_x, current_y = queue[cursor]
+                cursor += 1
+                count += 1
+                min_x = min(min_x, current_x)
+                max_x = max(max_x, current_x)
+                min_y = min(min_y, current_y)
+                max_y = max(max_y, current_y)
+
+                for next_y in range(current_y - 1, current_y + 2):
+                    if next_y < 0 or next_y >= height:
+                        continue
+                    for next_x in range(current_x - 1, current_x + 2):
+                        if next_x < 0 or next_x >= width or (next_x == current_x and next_y == current_y):
+                            continue
+                        next_index = next_y * width + next_x
+                        if mask[next_index] and not seen[next_index]:
+                            seen[next_index] = 1
+                            queue.append((next_x, next_y))
+
+            adb_area = round(count * area_scale)
+            comp_left, comp_top = image_point_to_adb(image, left + min_x, top + min_y)
+            comp_right, comp_bottom = image_point_to_adb(image, left + max_x + 1, top + max_y + 1)
+            comp_width = comp_right - comp_left
+            comp_height = comp_bottom - comp_top
+
+            if not (2500 <= adb_area <= 12000 and 55 <= comp_width <= 150 and 85 <= comp_height <= 210):
+                continue
+            if best is None or adb_area > best[0]:
+                best = (adb_area, (comp_left, comp_top, comp_right, comp_bottom))
+
+    if best is None:
+        return None
+
+    _area, (comp_left, comp_top, comp_right, comp_bottom) = best
+    comp_width = comp_right - comp_left
+    comp_height = comp_bottom - comp_top
+    target_x = comp_left + round(comp_width * 0.18)
+    target_y = comp_bottom + round(comp_height * 0.22)
+    target_x = max(SOLDIER_TRAIN_BUTTON_BLOCK[0], min(SOLDIER_TRAIN_BUTTON_BLOCK[2], target_x))
+    target_y = max(SOLDIER_TRAIN_BUTTON_BLOCK[1], min(SOLDIER_TRAIN_BUTTON_BLOCK[3], target_y))
     return target_x, target_y
 
 
@@ -2696,16 +2783,42 @@ class MultiPanelApp:
             self.thread_log(window, "任务已停止。")
             return False
 
-        self.thread_log(window, "点击训练按钮。")
-        tap_target(window, "soldier_train")
-        ok, image = self.wait_for_image(
-            window,
-            soldier_training_started_visible,
-            f"{unit_label} 数量条已消失，已开始训练。",
-            f"{unit_label} 点击训练后数量条仍未消失，停止训练任务。",
-            attempts=16,
-        )
-        if not ok:
+        training_started = False
+        for train_attempt in range(1, 4):
+            if self.should_stop(window):
+                self.thread_log(window, "任务已停止。")
+                return False
+
+            self.show_debug_step(window, "train_levels")
+            image, _profile = capture_target(window)
+            guided_train_point = find_guided_soldier_train_button(image)
+            if guided_train_point is not None:
+                self.thread_log(
+                    window,
+                    f"识别到训练按钮手势，点击坐标=({guided_train_point[0]}, {guided_train_point[1]})。",
+                )
+                tap_point(window, guided_train_point[0], guided_train_point[1])
+            else:
+                self.thread_log(window, "点击训练按钮。")
+                tap_target(window, "soldier_train")
+
+            for _ in range(8):
+                if not self.sleep_with_stop(window, 0.35):
+                    self.thread_log(window, "任务已停止。")
+                    return False
+                image, _profile = capture_target(window)
+                if soldier_training_started_visible(image):
+                    self.thread_log(window, f"{unit_label} 数量条已消失，已开始训练。")
+                    training_started = True
+                    break
+
+            if training_started:
+                break
+            if train_attempt < 3:
+                self.thread_log(window, f"{unit_label} 数量条仍存在，第 {train_attempt + 1}/3 次重试点击训练按钮。")
+
+        if not training_started:
+            self.thread_log(window, f"{unit_label} 点击训练后数量条仍未消失，停止训练任务。")
             return False
 
         self.thread_log(window, "点击左上角返回。")
