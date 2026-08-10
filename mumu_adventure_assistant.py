@@ -1143,7 +1143,7 @@ def auto_assist_handshake_visible(image: Image.Image, profile: ScreenProfile = A
     green_ratio = adb_box_ratio(image, AUTO_ASSIST_GREEN_BLOCK, auto_assist_green_pixel)
     hand_ratio = adb_box_ratio(image, AUTO_ASSIST_HAND_BLOCK, auto_assist_hand_pixel)
     bubble_white_ratio = adb_box_ratio(image, AUTO_ASSIST_BUBBLE_BLOCK, icon_white_pixel)
-    return green_ratio >= 0.055 and hand_ratio >= 0.045 and bubble_white_ratio >= 0.16
+    return green_ratio >= 0.055 and hand_ratio >= 0.045 and bubble_white_ratio >= 0.10
 
 
 def adventure_page_visible(image: Image.Image, profile: ScreenProfile) -> bool:
@@ -1483,6 +1483,20 @@ def format_duration(seconds: int) -> str:
     hours, remainder = divmod(seconds, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def unit_row_status_text(image: Image.Image, row_y: int) -> str:
+    state = unit_row_state(image, row_y)
+    if state == "busy":
+        remaining = unit_row_remaining_seconds(image, row_y)
+        return f"训练中 {format_duration(remaining)}" if remaining is not None else "训练中"
+    if state == "ready":
+        return "已完成"
+    if state == "idle":
+        return "空闲中"
+    if state == "blocked":
+        return "建筑升级中"
+    return "未知"
 
 
 def adb_fixed_point_visible(image: Image.Image, x: int, y: int, target: tuple[int, int, int]) -> bool:
@@ -2531,14 +2545,23 @@ class TargetPanel:
         self.task_hint_var = tk.StringVar(master=root, value="当前任务：空闲 | 状态：等待\n操作：勾选任务后点击开始任务。")
         self.task_vars: dict[str, tk.BooleanVar] = {}
         self.task_checks: dict[str, tk.Checkbutton] = {}
+        self.task_text_labels: dict[str, tk.Widget] = {}
         self.start_btn: tk.Button | None = None
         self.stop_btn: tk.Button | None = None
         self.debug_ranges_var = tk.BooleanVar(master=root, value=False)
         self.debug_check: tk.Checkbutton | None = None
         self.assist_interval_var = tk.IntVar(master=root, value=AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS)
+        self.auto_assist_countdown_var = tk.StringVar(master=root, value="")
+        self.auto_assist_countdown_label: tk.Label | None = None
+        self.auto_assist_countdown_active = False
         self.assist_interval_spin: tk.Spinbox | None = None
         self.debug_overlay: DebugRangeOverlay | None = None
         self.debug_ranges: list[DebugRange] = debug_ranges_for_step("home")
+        self.soldier_status_popup: tk.Toplevel | None = None
+        self.soldier_status_title_var = tk.StringVar(master=root, value="")
+        self.soldier_status_summary_var = tk.StringVar(master=root, value="")
+        self.soldier_status_row_vars: dict[str, tk.StringVar] = {}
+        self.soldier_status_after_id: str | None = None
 
         self.top = tk.Toplevel(root)
         self.top.title(self.title_summary())
@@ -2605,21 +2628,53 @@ class TargetPanel:
 
         for index, (task_key, task_label) in enumerate(TASK_DEFINITIONS):
             var = tk.BooleanVar(master=self.top, value=(task_key != "adventure"))
-            check = tk.Checkbutton(
-                task_grid,
-                text=task_label,
-                variable=var,
-                indicatoron=True,
-                bg="#1f2937",
-                fg="#d1d5db",
-                selectcolor="#111827",
-                activebackground="#1f2937",
-                activeforeground="#ffffff",
-                font=("Microsoft YaHei UI", 10, "bold"),
-                anchor="w",
-            )
             row, column = task_positions.get(task_key, (1 + index // 3, index % 3))
-            check.grid(row=row, column=column, sticky="ew", padx=(0, 10), pady=3)
+            if task_key == "train_soldiers":
+                row_frame = tk.Frame(task_grid, bg="#1f2937")
+                row_frame.grid(row=row, column=column, sticky="ew", padx=(0, 10), pady=3)
+                row_frame.columnconfigure(1, weight=1)
+                check = tk.Checkbutton(
+                    row_frame,
+                    text="",
+                    variable=var,
+                    indicatoron=True,
+                    bg="#1f2937",
+                    fg="#d1d5db",
+                    selectcolor="#111827",
+                    activebackground="#1f2937",
+                    activeforeground="#ffffff",
+                    font=("Microsoft YaHei UI", 10, "bold"),
+                    anchor="w",
+                    width=1,
+                )
+                check.grid(row=0, column=0, sticky="w")
+                label = tk.Label(
+                    row_frame,
+                    text=task_label,
+                    bg="#1f2937",
+                    fg="#d1d5db",
+                    font=("Microsoft YaHei UI", 10, "bold"),
+                    cursor="hand2",
+                    anchor="w",
+                )
+                label.grid(row=0, column=1, sticky="w", padx=(4, 0))
+                label.bind("<Button-1>", self.open_soldier_status_popup)
+                self.task_text_labels[task_key] = label
+            else:
+                check = tk.Checkbutton(
+                    task_grid,
+                    text=task_label,
+                    variable=var,
+                    indicatoron=True,
+                    bg="#1f2937",
+                    fg="#d1d5db",
+                    selectcolor="#111827",
+                    activebackground="#1f2937",
+                    activeforeground="#ffffff",
+                    font=("Microsoft YaHei UI", 10, "bold"),
+                    anchor="w",
+                )
+                check.grid(row=row, column=column, sticky="ew", padx=(0, 10), pady=3)
             self.task_vars[task_key] = var
             self.task_checks[task_key] = check
 
@@ -2638,6 +2693,16 @@ class TargetPanel:
             anchor="w",
         )
         self.debug_check.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(8, 3))
+
+        self.auto_assist_countdown_label = tk.Label(
+            task_grid,
+            textvariable=self.auto_assist_countdown_var,
+            bg="#1f2937",
+            fg="#93c5fd",
+            anchor="w",
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.auto_assist_countdown_label.grid(row=0, column=2, sticky="w", padx=(0, 8), pady=3)
 
         task_hint = tk.Label(
             task_grid,
@@ -2721,6 +2786,9 @@ class TargetPanel:
             font=("Microsoft YaHei UI", 9),
         )
         interval_unit.grid(row=0, column=2, sticky="e", padx=(6, 0))
+
+        self.assist_interval_var.trace_add("write", lambda *_: self.sync_auto_assist_countdown_label())
+        self.sync_auto_assist_countdown_label()
 
     def title_summary(self) -> str:
         index = self.window.vm_index or "?"
@@ -2836,19 +2904,139 @@ class TargetPanel:
         self.assist_interval_var.set(value)
         return value
 
+    def sync_auto_assist_countdown_label(self) -> None:
+        if self.auto_assist_countdown_active:
+            return
+        try:
+            value = int(self.assist_interval_var.get())
+        except (tk.TclError, ValueError):
+            value = AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS
+        value = max(AUTO_ASSIST_MIN_INTERVAL_SECONDS, min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, value))
+        self.auto_assist_countdown_var.set(f"{value} 秒")
+
+    def set_auto_assist_countdown(self, remaining_seconds: int | None) -> None:
+        if remaining_seconds is None:
+            self.auto_assist_countdown_active = False
+            self.sync_auto_assist_countdown_label()
+            return
+        self.auto_assist_countdown_active = True
+        remaining_seconds = max(0, int(remaining_seconds))
+        self.auto_assist_countdown_var.set("检测中" if remaining_seconds == 0 else f"{remaining_seconds} 秒")
+
     def reset_task_states(self) -> None:
         for check in self.task_checks.values():
             check.configure(fg="#d1d5db", activeforeground="#ffffff")
+        for label in self.task_text_labels.values():
+            label.configure(fg="#d1d5db")
         self.task_hint_var.set("当前任务：空闲 | 状态：等待\n操作：勾选任务后点击开始任务。")
+        self.set_auto_assist_countdown(None)
 
     def mark_task_done(self, task_key: str) -> None:
         check = self.task_checks.get(task_key)
         if check is not None:
             check.configure(fg="#22c55e", activeforeground="#22c55e")
+        label = self.task_text_labels.get(task_key)
+        if label is not None:
+            label.configure(fg="#22c55e")
         task_label = dict(TASK_DEFINITIONS).get(task_key, task_key)
         self.task_hint_var.set(f"当前任务：{task_label} | 状态：成功\n操作：任务已完成。")
 
+    def open_soldier_status_popup(self, _event=None) -> str:
+        if self.soldier_status_popup is not None and self.soldier_status_popup.winfo_exists():
+            self.soldier_status_popup.deiconify()
+            self.soldier_status_popup.lift()
+            self.refresh_soldier_status_popup()
+            return "break"
+
+        popup = tk.Toplevel(self.top)
+        popup.title("训练士兵状态")
+        popup.configure(bg="#111827")
+        popup.resizable(False, False)
+        popup.attributes("-topmost", False)
+        popup.protocol("WM_DELETE_WINDOW", self.close_soldier_status_popup)
+        self.soldier_status_popup = popup
+
+        x = self.top.winfo_rootx() + 24
+        y = self.top.winfo_rooty() + CONTROL_HEIGHT + 8
+        popup.geometry(f"280x162+{x}+{y}")
+
+        tk.Label(
+            popup,
+            textvariable=self.soldier_status_title_var,
+            bg="#111827",
+            fg="#f9fafb",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(10, 4))
+
+        self.soldier_status_row_vars = {}
+        for row, (_unit_key, unit_label, _row_y) in enumerate(TRAIN_UNITS, start=1):
+            tk.Label(
+                popup,
+                text=f"{unit_label}：",
+                bg="#111827",
+                fg="#d1d5db",
+                font=("Microsoft YaHei UI", 10),
+                anchor="w",
+                width=7,
+            ).grid(row=row, column=0, sticky="w", padx=(12, 2), pady=3)
+            var = tk.StringVar(master=popup, value="读取中")
+            self.soldier_status_row_vars[unit_label] = var
+            tk.Label(
+                popup,
+                textvariable=var,
+                bg="#111827",
+                fg="#93c5fd",
+                font=("Microsoft YaHei UI", 10, "bold"),
+                anchor="w",
+                width=18,
+            ).grid(row=row, column=1, sticky="w", padx=(2, 12), pady=3)
+
+        tk.Label(
+            popup,
+            textvariable=self.soldier_status_summary_var,
+            bg="#111827",
+            fg="#9ca3af",
+            font=("Microsoft YaHei UI", 8),
+            anchor="w",
+        ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(5, 10))
+
+        popup.grid_columnconfigure(1, weight=1)
+        self.refresh_soldier_status_popup()
+        return "break"
+
+    def refresh_soldier_status_popup(self) -> None:
+        if self.soldier_status_popup is None or not self.soldier_status_popup.winfo_exists():
+            return
+
+        try:
+            status_lines, summary = self.app.read_soldier_status_lines(self.window, ensure_queue=True)
+        except Exception as exc:
+            status_lines = [(unit_label, "读取失败") for _unit_key, unit_label, _row_y in TRAIN_UNITS]
+            summary = f"错误：{exc}"
+
+        self.soldier_status_title_var.set(self.title_summary())
+        self.soldier_status_summary_var.set(summary)
+        for unit_label, status_text in status_lines:
+            var = self.soldier_status_row_vars.get(unit_label)
+            if var is not None:
+                var.set(status_text)
+
+        self.soldier_status_after_id = self.soldier_status_popup.after(1000, self.refresh_soldier_status_popup)
+
+    def close_soldier_status_popup(self) -> None:
+        if self.soldier_status_popup is not None and self.soldier_status_after_id is not None:
+            try:
+                self.soldier_status_popup.after_cancel(self.soldier_status_after_id)
+            except tk.TclError:
+                pass
+        self.soldier_status_after_id = None
+        if self.soldier_status_popup is not None and self.soldier_status_popup.winfo_exists():
+            self.soldier_status_popup.destroy()
+        self.soldier_status_popup = None
+
     def destroy(self) -> None:
+        self.close_soldier_status_popup()
         self.hide_debug_overlay()
         self.top.destroy()
 
@@ -3172,11 +3360,21 @@ class MultiPanelApp:
 
             while auto_assist_enabled and not stop_event.is_set():
                 self.clear_current_task(window)
+                self.set_panel_auto_assist_countdown(window.hwnd, assist_interval)
                 self.thread_log(window, f"自动协助将在 {assist_interval} 秒后再次检测。")
-                if not self.sleep_with_stop(window, assist_interval):
+                remaining = assist_interval
+                interrupted = False
+                while remaining > 0 and not stop_event.is_set():
+                    if not self.sleep_with_stop(window, 1.0):
+                        interrupted = True
+                        break
+                    remaining -= 1
+                    self.set_panel_auto_assist_countdown(window.hwnd, remaining)
+                if interrupted or stop_event.is_set() or self.should_stop(window):
                     self.thread_log(window, "任务已停止。")
                     break
 
+                self.set_panel_auto_assist_countdown(window.hwnd, 0)
                 handler = handlers["auto_assist"]
                 result = self.run_one_task(
                     window,
@@ -3197,6 +3395,7 @@ class MultiPanelApp:
             traceback.print_exc()
             self.thread_log(window, f"执行失败：{exc}")
         finally:
+            self.set_panel_auto_assist_countdown(window.hwnd, None)
             self.workers.pop(window.hwnd, None)
             self.stop_events.pop(window.hwnd, None)
             self.timeout_events.pop(window.hwnd, None)
@@ -3217,9 +3416,47 @@ class MultiPanelApp:
         if panel:
             panel.mark_task_done(task_key)
 
+    def set_panel_auto_assist_countdown(self, hwnd: int, remaining_seconds: int | None) -> None:
+        panel = self.panels.get(hwnd)
+        if panel is None:
+            return
+
+        def _apply() -> None:
+            panel.set_auto_assist_countdown(remaining_seconds)
+
+        self.root.after(0, _apply)
+
     def capture_detection(self, window: TargetWindow) -> tuple[Image.Image, ScreenProfile, Detection]:
         image, profile = capture_target(window)
         return image, profile, analyze_screen(image, profile)
+
+    def read_soldier_status_lines(
+        self,
+        window: TargetWindow,
+        ensure_queue: bool = False,
+    ) -> tuple[list[tuple[str, str]], str]:
+        image, _profile = capture_target(window)
+        if ensure_queue and main_screen_visible(image) and not queue_panel_visible(image):
+            tap_target(window, "queue_expand")
+            time.sleep(0.45)
+            image, _profile = capture_target(window)
+
+        if ensure_queue and queue_panel_visible(image) and not queue_panel_at_top_visible(image):
+            for _attempt in range(3):
+                swipe_point(window, QUEUE_SCROLL_X, QUEUE_SCROLL_TOP_START_Y, QUEUE_SCROLL_X, QUEUE_SCROLL_TOP_END_Y)
+                time.sleep(0.25)
+                image, _profile = capture_target(window)
+                if queue_panel_at_top_visible(image):
+                    break
+
+        if not queue_panel_visible(image):
+            summary = "队列未展开"
+            lines = [(unit_label, "队列未展开") for _unit_key, unit_label, _row_y in TRAIN_UNITS]
+            return lines, summary
+
+        summary = "队列已展开" if queue_panel_at_top_visible(image) else "队列未在顶部"
+        lines = [(unit_label, unit_row_status_text(image, row_y)) for _unit_key, unit_label, row_y in TRAIN_UNITS]
+        return lines, summary
 
     def wait_for(
         self,
