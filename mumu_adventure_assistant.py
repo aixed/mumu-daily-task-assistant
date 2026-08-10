@@ -2316,8 +2316,9 @@ class TargetPanel:
 
         task_grid = tk.Frame(tasks, bg="#1f2937")
         task_grid.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        for column in range(3):
-            task_grid.columnconfigure(column, weight=1)
+        task_grid.columnconfigure(0, minsize=130, weight=0)
+        task_grid.columnconfigure(1, minsize=130, weight=0)
+        task_grid.columnconfigure(2, weight=1)
 
         task_positions = {
             "adventure": (0, 0),
@@ -2328,7 +2329,7 @@ class TargetPanel:
         for index, (task_key, task_label) in enumerate(TASK_DEFINITIONS):
             var = tk.BooleanVar(master=self.top, value=(task_key != "adventure"))
             check = tk.Checkbutton(
-                tasks,
+                task_grid,
                 text=task_label,
                 variable=var,
                 indicatoron=True,
@@ -2387,9 +2388,9 @@ class TargetPanel:
             activebackground="#15803d",
             activeforeground="#ffffff",
             bd=0,
-            padx=12,
+            padx=8,
             pady=6,
-            width=9,
+            width=8,
             font=("Microsoft YaHei UI", 9, "bold"),
         )
         self.start_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=3)
@@ -2403,9 +2404,9 @@ class TargetPanel:
             activebackground="#b91c1c",
             activeforeground="#ffffff",
             bd=0,
-            padx=12,
+            padx=8,
             pady=6,
-            width=7,
+            width=5,
             font=("Microsoft YaHei UI", 9, "bold"),
         )
         self.stop_btn.grid(row=0, column=1, sticky="ew", pady=3)
