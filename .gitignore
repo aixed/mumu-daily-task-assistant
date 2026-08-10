@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 debug_captures/
+mumu_assistant_settings.json
 .venv/
 venv/
 env/

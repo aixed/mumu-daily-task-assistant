@@ -103,6 +103,7 @@ WINDOW_CLICK_POINTS = {
 DEBUG_DIR = Path("debug_captures")
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 BUILDING_TRAIN_ACTION_TEMPLATE = ASSET_DIR / "building_train_action_template.png"
+CONFIG_PATH = Path(__file__).resolve().with_name("mumu_assistant_settings.json")
 
 TASK_DEFINITIONS = [
     ("adventure", "探险领取"),
@@ -521,6 +522,54 @@ def extract_json(text: str) -> dict:
     if start < 0 or end < start:
         raise ValueError("输出中没有 JSON 对象")
     return json.loads(text[start : end + 1])
+
+
+def default_panel_settings() -> dict:
+    return {
+        "tasks": {task_key: True for task_key, _task_label in TASK_DEFINITIONS},
+        "assist_interval": AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS,
+        "debug_ranges": False,
+    }
+
+
+def load_app_settings() -> dict:
+    if not CONFIG_PATH.exists():
+        return {"windows": {}}
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"windows": {}}
+    if not isinstance(data, dict):
+        return {"windows": {}}
+    windows = data.get("windows")
+    if not isinstance(windows, dict):
+        data["windows"] = {}
+    return data
+
+
+def save_app_settings(settings: dict) -> None:
+    try:
+        CONFIG_PATH.write_text(
+            json.dumps(settings, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def window_settings_keys(window: TargetWindow) -> list[str]:
+    keys: list[str] = []
+    if window.vm_index:
+        keys.append(f"index:{window.vm_index}")
+    if window.adb_serial:
+        keys.append(f"adb:{window.adb_serial}")
+    if window.title:
+        keys.append(f"title:{window.title}")
+    return keys or [f"hwnd:{window.hwnd}"]
+
+
+def primary_window_settings_key(window: TargetWindow) -> str:
+    return window_settings_keys(window)[0]
 
 
 def load_mumu_info(force: bool = False) -> dict[int, dict]:
@@ -2716,6 +2765,8 @@ class TargetPanel:
     def __init__(self, app: "MultiPanelApp", root: tk.Tk, window: TargetWindow) -> None:
         self.app = app
         self.window = window
+        self.saved_settings = app.panel_settings(window)
+        self.settings_ready = False
         self.status_var = tk.StringVar(master=root, value="已附加，等待操作。")
         self.task_hint_var = tk.StringVar(master=root, value="当前任务：空闲 | 状态：等待\n操作：勾选任务后点击开始任务。")
         self.task_vars: dict[str, tk.BooleanVar] = {}
@@ -2723,9 +2774,19 @@ class TargetPanel:
         self.task_text_labels: dict[str, tk.Widget] = {}
         self.start_btn: tk.Button | None = None
         self.stop_btn: tk.Button | None = None
-        self.debug_ranges_var = tk.BooleanVar(master=root, value=False)
+        self.debug_ranges_var = tk.BooleanVar(master=root, value=bool(self.saved_settings.get("debug_ranges", False)))
         self.debug_check: tk.Checkbutton | None = None
-        self.assist_interval_var = tk.IntVar(master=root, value=AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS)
+        try:
+            self.assist_interval_value = int(
+                self.saved_settings.get("assist_interval", AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS)
+            )
+        except (TypeError, ValueError):
+            self.assist_interval_value = AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS
+        self.assist_interval_value = max(
+            AUTO_ASSIST_MIN_INTERVAL_SECONDS,
+            min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, self.assist_interval_value),
+        )
+        self.assist_interval_var = tk.IntVar(master=root, value=self.assist_interval_value)
         self.auto_assist_countdown_var = tk.StringVar(master=root, value="")
         self.auto_assist_countdown_label: tk.Label | None = None
         self.auto_assist_countdown_active = False
@@ -2753,6 +2814,8 @@ class TargetPanel:
         self._drag_start: tuple[int, int] | None = None
         self.build_ui()
         self.attach()
+        if self.debug_ranges_var.get():
+            self.toggle_debug_ranges()
 
     def build_ui(self) -> None:
         self.top.columnconfigure(0, weight=1)
@@ -2806,8 +2869,13 @@ class TargetPanel:
             "train_soldiers": (1, 0),
         }
 
+        saved_tasks = self.saved_settings.get("tasks", {})
+        if not isinstance(saved_tasks, dict):
+            saved_tasks = {}
+        default_tasks = default_panel_settings()["tasks"]
+
         for index, (task_key, task_label) in enumerate(TASK_DEFINITIONS):
-            var = tk.BooleanVar(master=self.top, value=(task_key != "adventure"))
+            var = tk.BooleanVar(master=self.top, value=bool(saved_tasks.get(task_key, default_tasks.get(task_key, True))))
             row, column = task_positions.get(task_key, (1 + index // 3, index % 3))
             if task_key == "train_soldiers":
                 row_frame = tk.Frame(task_grid, bg="#1f2937")
@@ -2826,6 +2894,7 @@ class TargetPanel:
                     font=("Microsoft YaHei UI", 10, "bold"),
                     anchor="w",
                     width=1,
+                    command=self.save_settings,
                 )
                 check.grid(row=0, column=0, sticky="w")
                 label = tk.Label(
@@ -2853,10 +2922,12 @@ class TargetPanel:
                     activeforeground="#ffffff",
                     font=("Microsoft YaHei UI", 10, "bold"),
                     anchor="w",
+                    command=self.save_settings,
                 )
                 check.grid(row=row, column=column, sticky="ew", padx=(0, 10), pady=3)
             self.task_vars[task_key] = var
             self.task_checks[task_key] = check
+            var.trace_add("write", lambda *_: self.save_settings())
 
         self.debug_check = tk.Checkbutton(
             task_grid,
@@ -2967,7 +3038,8 @@ class TargetPanel:
         )
         interval_unit.grid(row=0, column=2, sticky="e", padx=(6, 0))
 
-        self.assist_interval_var.trace_add("write", lambda *_: self.sync_auto_assist_countdown_label())
+        self.assist_interval_var.trace_add("write", lambda *_: self.on_assist_interval_changed())
+        self.settings_ready = True
         self.sync_auto_assist_countdown_label()
 
     def title_summary(self) -> str:
@@ -3042,8 +3114,6 @@ class TargetPanel:
         state = "disabled" if busy else "normal"
         if self.start_btn is not None:
             self.start_btn.configure(state=state)
-        if self.assist_interval_spin is not None:
-            self.assist_interval_spin.configure(state=state)
         for check in self.task_checks.values():
             check.configure(state=state)
 
@@ -3054,9 +3124,11 @@ class TargetPanel:
             self.debug_overlay.set_ranges(self.debug_ranges)
             self.debug_overlay.refresh()
             self.log("已显示取色范围。")
+            self.save_settings()
             return
         self.hide_debug_overlay()
         self.log("已隐藏取色范围。")
+        self.save_settings()
 
     def show_debug_ranges(self, ranges: list[DebugRange]) -> None:
         self.debug_ranges = ranges
@@ -3081,18 +3153,24 @@ class TargetPanel:
         except (tk.TclError, ValueError):
             value = AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS
         value = max(AUTO_ASSIST_MIN_INTERVAL_SECONDS, min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, value))
-        self.assist_interval_var.set(value)
+        self.assist_interval_value = value
+        try:
+            if int(self.assist_interval_var.get()) != value:
+                self.assist_interval_var.set(value)
+        except (tk.TclError, ValueError):
+            self.assist_interval_var.set(value)
         return value
+
+    def on_assist_interval_changed(self) -> None:
+        self.assist_interval_seconds()
+        self.sync_auto_assist_countdown_label()
+        self.save_settings()
 
     def sync_auto_assist_countdown_label(self) -> None:
         if self.auto_assist_countdown_active:
             return
-        try:
-            value = int(self.assist_interval_var.get())
-        except (tk.TclError, ValueError):
-            value = AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS
-        value = max(AUTO_ASSIST_MIN_INTERVAL_SECONDS, min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, value))
-        self.auto_assist_countdown_var.set(f"{value} 秒")
+        value = self.assist_interval_seconds()
+        self.auto_assist_countdown_var.set(f"间隔 {value} 秒")
 
     def set_auto_assist_countdown(self, remaining_seconds: int | None) -> None:
         if remaining_seconds is None:
@@ -3101,7 +3179,18 @@ class TargetPanel:
             return
         self.auto_assist_countdown_active = True
         remaining_seconds = max(0, int(remaining_seconds))
-        self.auto_assist_countdown_var.set("检测中" if remaining_seconds == 0 else f"{remaining_seconds} 秒")
+        self.auto_assist_countdown_var.set("检测中" if remaining_seconds == 0 else f"下次 {remaining_seconds} 秒")
+
+    def save_settings(self) -> None:
+        if not getattr(self, "settings_ready", False):
+            return
+        tasks = {task_key: bool(var.get()) for task_key, var in self.task_vars.items()}
+        self.app.save_panel_settings(
+            self.window,
+            tasks=tasks,
+            assist_interval=self.assist_interval_value,
+            debug_ranges=bool(self.debug_ranges_var.get()),
+        )
 
     def reset_task_states(self) -> None:
         for check in self.task_checks.values():
@@ -3271,17 +3360,77 @@ class MultiPanelApp:
         self.closed = False
         self.root = tk.Tk()
         self.root.withdraw()
+        self.settings = load_app_settings()
+        self.settings_lock = threading.Lock()
         self.panels: dict[int, TargetPanel] = {}
         self.workers: dict[int, threading.Thread] = {}
         self.stop_events: dict[int, threading.Event] = {}
         self.timeout_events: dict[int, threading.Event] = {}
         self.watchdogs: dict[int, threading.Thread] = {}
+        self.auto_assist_workers: dict[int, threading.Thread] = {}
+        self.action_locks: dict[int, threading.Lock] = {}
         self.current_tasks: dict[int, str] = {}
         self.step_started_at: dict[int, float] = {}
         self.step_signatures: dict[int, str] = {}
+        self.soldier_busy_until: dict[int, dict[str, float]] = {}
 
         self.refresh_targets(force=True)
         self.follow_targets()
+
+    def panel_settings(self, window: TargetWindow) -> dict:
+        merged = default_panel_settings()
+        windows = self.settings.get("windows", {})
+        if not isinstance(windows, dict):
+            return merged
+
+        saved: dict | None = None
+        for key in window_settings_keys(window):
+            candidate = windows.get(key)
+            if isinstance(candidate, dict):
+                saved = candidate
+                break
+        if not saved:
+            return merged
+
+        saved_tasks = saved.get("tasks")
+        if isinstance(saved_tasks, dict):
+            merged["tasks"].update({task_key: bool(saved_tasks.get(task_key, merged["tasks"][task_key])) for task_key in merged["tasks"]})
+        try:
+            merged["assist_interval"] = int(saved.get("assist_interval", merged["assist_interval"]))
+        except (TypeError, ValueError):
+            pass
+        merged["assist_interval"] = max(
+            AUTO_ASSIST_MIN_INTERVAL_SECONDS,
+            min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, int(merged["assist_interval"])),
+        )
+        merged["debug_ranges"] = bool(saved.get("debug_ranges", merged["debug_ranges"]))
+        return merged
+
+    def save_panel_settings(
+        self,
+        window: TargetWindow,
+        tasks: dict[str, bool],
+        assist_interval: int,
+        debug_ranges: bool,
+    ) -> None:
+        clean_tasks = {task_key: bool(tasks.get(task_key, True)) for task_key, _label in TASK_DEFINITIONS}
+        assist_interval = max(
+            AUTO_ASSIST_MIN_INTERVAL_SECONDS,
+            min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, int(assist_interval)),
+        )
+        with self.settings_lock:
+            windows = self.settings.setdefault("windows", {})
+            if not isinstance(windows, dict):
+                windows = {}
+                self.settings["windows"] = windows
+            windows[primary_window_settings_key(window)] = {
+                "tasks": clean_tasks,
+                "assist_interval": assist_interval,
+                "debug_ranges": bool(debug_ranges),
+                "title": window.title,
+                "adb_serial": window.adb_serial,
+            }
+            save_app_settings(self.settings)
 
     def close(self) -> None:
         self.closed = True
@@ -3335,29 +3484,56 @@ class MultiPanelApp:
     def start_worker(self, panel: TargetPanel, task_keys: list[str], assist_interval: int) -> None:
         hwnd = panel.window.hwnd
         existing_worker = self.workers.get(hwnd)
-        if existing_worker and existing_worker.is_alive():
+        existing_assist_worker = self.auto_assist_workers.get(hwnd)
+        one_time_task_keys = [task_key for task_key in task_keys if task_key != "auto_assist"]
+        auto_assist_selected = "auto_assist" in task_keys
+
+        if one_time_task_keys and existing_worker and existing_worker.is_alive():
             panel.log("任务正在执行中，请稍等。")
             return
-        panel.set_busy(True)
-        stop_event = threading.Event()
-        timeout_event = threading.Event()
+        if auto_assist_selected and existing_assist_worker and existing_assist_worker.is_alive() and not one_time_task_keys:
+            panel.log("自动协助已经在循环检测中。")
+            return
+
+        stop_event = self.stop_events.get(hwnd)
+        if stop_event is None or stop_event.is_set():
+            stop_event = threading.Event()
+        timeout_event = self.timeout_events.get(hwnd)
+        if timeout_event is None:
+            timeout_event = threading.Event()
         self.stop_events[hwnd] = stop_event
         self.timeout_events[hwnd] = timeout_event
-        worker = threading.Thread(
-            target=self.worker_main,
-            args=(panel.window, task_keys, stop_event, timeout_event, assist_interval),
-            daemon=True,
-        )
-        watchdog = threading.Thread(
-            target=self.watchdog_main,
-            args=(panel.window, stop_event, timeout_event),
-            daemon=True,
-        )
-        self.workers[hwnd] = worker
-        self.watchdogs[hwnd] = watchdog
+        self.action_locks.setdefault(hwnd, threading.Lock())
         self.clear_current_task(panel.window)
-        watchdog.start()
-        worker.start()
+
+        existing_watchdog = self.watchdogs.get(hwnd)
+        if existing_watchdog is None or not existing_watchdog.is_alive():
+            watchdog = threading.Thread(
+                target=self.watchdog_main,
+                args=(panel.window, stop_event, timeout_event),
+                daemon=True,
+            )
+            self.watchdogs[hwnd] = watchdog
+            watchdog.start()
+
+        if one_time_task_keys:
+            panel.set_busy(True)
+            worker = threading.Thread(
+                target=self.worker_main,
+                args=(panel.window, one_time_task_keys, stop_event, timeout_event),
+                daemon=True,
+            )
+            self.workers[hwnd] = worker
+            worker.start()
+        if auto_assist_selected and not (existing_assist_worker and existing_assist_worker.is_alive()):
+            assist_worker = threading.Thread(
+                target=self.auto_assist_loop,
+                args=(panel.window, stop_event, timeout_event, assist_interval),
+                daemon=True,
+            )
+            self.auto_assist_workers[hwnd] = assist_worker
+            assist_worker.start()
+            panel.log("自动协助循环已启动。")
 
     def stop_all_tasks(self) -> None:
         running = 0
@@ -3367,8 +3543,44 @@ class MultiPanelApp:
                 event = self.stop_events.get(hwnd)
                 if event is not None:
                     event.set()
+        for hwnd, worker in list(self.auto_assist_workers.items()):
+            if worker.is_alive():
+                running += 1
+                event = self.stop_events.get(hwnd)
+                if event is not None:
+                    event.set()
         for panel in list(self.panels.values()):
             panel.log("已发送停止指令。" if running else "当前没有正在执行的任务。")
+
+    def worker_alive(self, hwnd: int) -> bool:
+        worker = self.workers.get(hwnd)
+        assist_worker = self.auto_assist_workers.get(hwnd)
+        return bool((worker and worker.is_alive()) or (assist_worker and assist_worker.is_alive()))
+
+    def cleanup_panel_if_idle(self, window: TargetWindow) -> None:
+        hwnd = window.hwnd
+        if self.worker_alive(hwnd):
+            return
+        stop_event = self.stop_events.get(hwnd)
+        if stop_event is not None:
+            stop_event.set()
+        self.set_panel_auto_assist_countdown(hwnd, None)
+        self.stop_events.pop(hwnd, None)
+        self.timeout_events.pop(hwnd, None)
+        self.watchdogs.pop(hwnd, None)
+        self.current_tasks.pop(hwnd, None)
+        self.step_started_at.pop(hwnd, None)
+        self.step_signatures.pop(hwnd, None)
+        self.show_debug_step(window, "home")
+        self.root.after(0, lambda hwnd=hwnd: self.set_panel_busy(hwnd, False))
+
+    def acquire_action_lock(self, window: TargetWindow, stop_event: threading.Event) -> threading.Lock | None:
+        lock = self.action_locks.setdefault(window.hwnd, threading.Lock())
+        while not stop_event.is_set():
+            if lock.acquire(blocking=False):
+                return lock
+            time.sleep(0.1)
+        return None
 
     def set_busy(self, busy: bool) -> None:
         for panel in list(self.panels.values()):
@@ -3504,50 +3716,58 @@ class MultiPanelApp:
             self.thread_log(window, "任务已停止。")
             return "stopped"
 
-        self.current_tasks[window.hwnd] = task_key
-        self.note_task_step(window, f"task:{task_key}", force=True)
-        self.thread_log(window, f"开始任务 {index}/{total}：{task_label}")
-
-        result: dict[str, bool] = {"ok": False}
-        task_done = threading.Event()
-
-        def _run_handler() -> None:
-            try:
-                result["ok"] = bool(handler(window))
-            except Exception as exc:
-                traceback.print_exc()
-                self.thread_log(window, f"任务执行异常：{exc}")
-                result["ok"] = False
-            finally:
-                task_done.set()
-
-        task_thread = threading.Thread(target=_run_handler, daemon=True)
-        task_thread.start()
-        while not task_done.wait(0.2):
-            if stop_event.is_set() or timeout_event.is_set():
-                break
-        if not task_done.is_set() and (stop_event.is_set() or timeout_event.is_set()):
-            task_done.wait(5.0)
-        ok = result["ok"] if task_done.is_set() else False
-        self.clear_current_task(window)
-
-        if timeout_event.is_set():
-            self.thread_log(window, f"任务超时：{task_label}，本轮停止并恢复主界面。")
-            self.recover_home_after_timeout(window, stop_event)
-            timeout_event.clear()
-            return "timeout"
-
-        if stop_event.is_set():
+        lock = self.acquire_action_lock(window, stop_event)
+        if lock is None:
             self.thread_log(window, "任务已停止。")
             return "stopped"
 
-        if not ok:
-            self.thread_log(window, f"任务未完成：{task_label}")
-            self.recover_home_after_timeout(window, stop_event)
-            return "failed"
+        try:
+            self.current_tasks[window.hwnd] = task_key
+            self.note_task_step(window, f"task:{task_key}", force=True)
+            self.thread_log(window, f"开始任务 {index}/{total}：{task_label}")
 
-        self.root.after(0, lambda key=task_key, hwnd=window.hwnd: self.mark_task_done(hwnd, key))
-        return "ok"
+            result: dict[str, bool] = {"ok": False}
+            task_done = threading.Event()
+
+            def _run_handler() -> None:
+                try:
+                    result["ok"] = bool(handler(window))
+                except Exception as exc:
+                    traceback.print_exc()
+                    self.thread_log(window, f"任务执行异常：{exc}")
+                    result["ok"] = False
+                finally:
+                    task_done.set()
+
+            task_thread = threading.Thread(target=_run_handler, daemon=True)
+            task_thread.start()
+            while not task_done.wait(0.2):
+                if stop_event.is_set() or timeout_event.is_set():
+                    break
+            if not task_done.is_set() and (stop_event.is_set() or timeout_event.is_set()):
+                task_done.wait(5.0)
+            ok = result["ok"] if task_done.is_set() else False
+            self.clear_current_task(window)
+
+            if timeout_event.is_set():
+                self.thread_log(window, f"任务超时：{task_label}，本轮停止并恢复主界面。")
+                self.recover_home_after_timeout(window, stop_event)
+                timeout_event.clear()
+                return "timeout"
+
+            if stop_event.is_set():
+                self.thread_log(window, "任务已停止。")
+                return "stopped"
+
+            if not ok:
+                self.thread_log(window, f"任务未完成：{task_label}")
+                self.recover_home_after_timeout(window, stop_event)
+                return "failed"
+
+            self.root.after(0, lambda key=task_key, hwnd=window.hwnd: self.mark_task_done(hwnd, key))
+            return "ok"
+        finally:
+            lock.release()
 
     def run_task_sequence(
         self,
@@ -3593,13 +3813,11 @@ class MultiPanelApp:
         task_keys: list[str],
         stop_event: threading.Event,
         timeout_event: threading.Event,
-        assist_interval: int,
     ) -> None:
         task_labels = dict(TASK_DEFINITIONS)
         handlers = self.task_handlers()
-        auto_assist_enabled = "auto_assist" in task_keys
         try:
-            initial_ok = self.run_task_sequence(
+            self.run_task_sequence(
                 window,
                 task_keys,
                 task_labels,
@@ -3607,27 +3825,47 @@ class MultiPanelApp:
                 stop_event,
                 timeout_event,
             )
-            if not initial_ok or stop_event.is_set():
-                return
+        except Exception as exc:
+            traceback.print_exc()
+            self.thread_log(window, f"执行失败：{exc}")
+        finally:
+            self.workers.pop(window.hwnd, None)
+            self.root.after(0, lambda hwnd=window.hwnd: self.set_panel_busy(hwnd, False))
+            self.cleanup_panel_if_idle(window)
 
-            while auto_assist_enabled and not stop_event.is_set():
-                self.clear_current_task(window)
-                self.set_panel_auto_assist_countdown(window.hwnd, assist_interval)
-                self.thread_log(window, f"自动协助将在 {assist_interval} 秒后再次检测。")
-                remaining = assist_interval
-                interrupted = False
-                while remaining > 0 and not stop_event.is_set():
-                    if not self.sleep_with_stop(window, 1.0):
-                        interrupted = True
+    def panel_assist_interval(self, hwnd: int, fallback: int) -> int:
+        panel = self.panels.get(hwnd)
+        if panel is None:
+            return fallback
+        return max(
+            AUTO_ASSIST_MIN_INTERVAL_SECONDS,
+            min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, int(getattr(panel, "assist_interval_value", fallback))),
+        )
+
+    def auto_assist_loop(
+        self,
+        window: TargetWindow,
+        stop_event: threading.Event,
+        timeout_event: threading.Event,
+        initial_interval: int,
+    ) -> None:
+        task_labels = dict(TASK_DEFINITIONS)
+        handler = self.task_handlers()["auto_assist"]
+        hwnd = window.hwnd
+        try:
+            while not stop_event.is_set():
+                interval = self.panel_assist_interval(hwnd, initial_interval)
+                self.thread_log(window, f"自动协助将在 {interval} 秒后检测。")
+                for remaining in range(interval, 0, -1):
+                    if stop_event.is_set():
                         break
-                    remaining -= 1
-                    self.set_panel_auto_assist_countdown(window.hwnd, remaining)
-                if interrupted or stop_event.is_set() or self.should_stop(window):
-                    self.thread_log(window, "任务已停止。")
+                    self.set_panel_auto_assist_countdown(hwnd, remaining)
+                    if not self.sleep_with_stop(window, 1.0):
+                        break
+                if stop_event.is_set():
                     break
 
-                self.set_panel_auto_assist_countdown(window.hwnd, 0)
-                handler = handlers["auto_assist"]
+                self.set_panel_auto_assist_countdown(hwnd, 0)
                 result = self.run_one_task(
                     window,
                     "auto_assist",
@@ -3642,21 +3880,13 @@ class MultiPanelApp:
                     break
                 if result == "failed":
                     self.thread_log(window, "自动协助本轮未完成，等待下次检测。")
-                    self.recover_home_after_timeout(window, stop_event)
         except Exception as exc:
             traceback.print_exc()
-            self.thread_log(window, f"执行失败：{exc}")
+            self.thread_log(window, f"自动协助循环异常：{exc}")
         finally:
-            self.set_panel_auto_assist_countdown(window.hwnd, None)
-            self.workers.pop(window.hwnd, None)
-            self.stop_events.pop(window.hwnd, None)
-            self.timeout_events.pop(window.hwnd, None)
-            self.watchdogs.pop(window.hwnd, None)
-            self.current_tasks.pop(window.hwnd, None)
-            self.step_started_at.pop(window.hwnd, None)
-            self.step_signatures.pop(window.hwnd, None)
-            self.show_debug_step(window, "home")
-            self.root.after(0, lambda hwnd=window.hwnd: self.set_panel_busy(hwnd, False))
+            self.set_panel_auto_assist_countdown(hwnd, None)
+            self.auto_assist_workers.pop(hwnd, None)
+            self.cleanup_panel_if_idle(window)
 
     def set_panel_busy(self, hwnd: int, busy: bool) -> None:
         panel = self.panels.get(hwnd)
@@ -3690,6 +3920,67 @@ class MultiPanelApp:
         snapshot, summary = self.read_soldier_status_snapshot(window, ensure_queue=ensure_queue)
         return [(unit_label, unit_status_display_text(state, remaining)) for unit_label, state, remaining in snapshot], summary
 
+    def unit_key_for_label(self, unit_label: str) -> str:
+        for unit_key, label, _row_y in TRAIN_UNITS:
+            if label == unit_label:
+                return unit_key
+        return unit_label
+
+    def cached_unit_busy_remaining(self, window: TargetWindow, unit_key: str) -> int | None:
+        by_unit = self.soldier_busy_until.get(window.hwnd)
+        if not by_unit:
+            return None
+        until = by_unit.get(unit_key)
+        if until is None:
+            return None
+        remaining = int(round(until - time.monotonic()))
+        if remaining > 0:
+            return remaining
+        by_unit.pop(unit_key, None)
+        if not by_unit:
+            self.soldier_busy_until.pop(window.hwnd, None)
+        return None
+
+    def set_unit_busy_cache(self, window: TargetWindow, unit_key: str, remaining: int | None) -> None:
+        if remaining is None:
+            return
+        remaining = max(0, int(remaining))
+        if remaining <= 0:
+            return
+        self.soldier_busy_until.setdefault(window.hwnd, {})[unit_key] = time.monotonic() + remaining
+
+    def clear_unit_busy_cache(self, window: TargetWindow, unit_key: str) -> None:
+        by_unit = self.soldier_busy_until.get(window.hwnd)
+        if not by_unit:
+            return
+        by_unit.pop(unit_key, None)
+        if not by_unit:
+            self.soldier_busy_until.pop(window.hwnd, None)
+
+    def apply_soldier_busy_cache(
+        self,
+        window: TargetWindow,
+        snapshot: list[tuple[str, str, int | None]],
+    ) -> list[tuple[str, str, int | None]]:
+        adjusted: list[tuple[str, str, int | None]] = []
+        for unit_label, state, remaining in snapshot:
+            unit_key = self.unit_key_for_label(unit_label)
+            cached_remaining = self.cached_unit_busy_remaining(window, unit_key)
+            if state == "busy":
+                if remaining is None:
+                    remaining = cached_remaining
+                else:
+                    self.set_unit_busy_cache(window, unit_key, remaining)
+                adjusted.append((unit_label, state, remaining))
+                continue
+            if state == "unknown" and cached_remaining is not None:
+                adjusted.append((unit_label, "busy", cached_remaining))
+                continue
+            if state in {"ready", "idle", "blocked"}:
+                self.clear_unit_busy_cache(window, unit_key)
+            adjusted.append((unit_label, state, remaining))
+        return adjusted
+
     def read_soldier_status_snapshot(
         self,
         window: TargetWindow,
@@ -3712,6 +4003,7 @@ class MultiPanelApp:
         if not queue_panel_visible(image):
             summary = "队列未展开"
             snapshot = [(unit_label, "unknown", None) for _unit_key, unit_label, _row_y in TRAIN_UNITS]
+            snapshot = self.apply_soldier_busy_cache(window, snapshot)
             return snapshot, summary
 
         top_visible = queue_panel_at_top_visible(image)
@@ -3720,6 +4012,7 @@ class MultiPanelApp:
             (unit_label, *unit_row_status_data(image, row_y))
             for _unit_key, unit_label, row_y in TRAIN_UNITS
         ]
+        snapshot = self.apply_soldier_busy_cache(window, snapshot)
         return snapshot, summary
 
     def wait_for(
@@ -3871,7 +4164,7 @@ class MultiPanelApp:
             if self.should_stop(window):
                 self.thread_log(window, "任务已停止。")
                 return False
-            if not self.train_one_unit(window, unit_label, row_y):
+            if not self.train_one_unit(window, unit_key, unit_label, row_y):
                 return False
             if not self.sleep_with_stop(window, 0.45):
                 self.thread_log(window, "任务已停止。")
@@ -3925,10 +4218,15 @@ class MultiPanelApp:
 
         return None
 
-    def train_one_unit(self, window: TargetWindow, unit_label: str, row_y: int) -> bool:
+    def train_one_unit(self, window: TargetWindow, unit_key: str, unit_label: str, row_y: int) -> bool:
         if self.should_stop(window):
             self.thread_log(window, "任务已停止。")
             return False
+
+        cached_remaining = self.cached_unit_busy_remaining(window, unit_key)
+        if cached_remaining is not None:
+            self.thread_log(window, f"{unit_label} 缓存显示正在训练，剩余 {format_duration(cached_remaining)}，跳过。")
+            return True
 
         unreadable_busy_count = 0
         while True:
@@ -3961,10 +4259,9 @@ class MultiPanelApp:
                         self.thread_log(window, "任务已停止。")
                         return False
                     continue
-                unreadable_busy_count = 0
-                if not self.wait_for_busy_unit(window, unit_label, row_y, remaining):
-                    return False
-                continue
+                self.set_unit_busy_cache(window, unit_key, remaining)
+                self.thread_log(window, f"{unit_label} 正在训练，剩余 {format_duration(remaining)}，已记录并跳过。")
+                return True
 
             unreadable_busy_count = 0
             if state == "blocked":
