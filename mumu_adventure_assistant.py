@@ -166,6 +166,12 @@ MAIN_TOP_FIXED_POINTS = [
     ("顶栏蓝", 112, 58, (172, 200, 223)),
     ("顶栏黄", 441, 76, (250, 203, 72)),
 ]
+MAIN_TOP_BAR_BLOCKS = [
+    (200, 16, 245, 48),
+    (320, 16, 390, 48),
+    (455, 16, 535, 48),
+    (610, 16, 690, 48),
+]
 MAIN_TOGGLE_FIXED_POINTS = [
     ("切换金", 630, 1180, (249, 162, 26)),
     ("底栏蓝", 600, 1230, NAV_BLUE),
@@ -1231,6 +1237,8 @@ def debug_ranges_for_step(
             ranges.append((label, "#a78bfa", debug_point_box(x, y)))
         for label, x, y, _target in MAIN_TOP_FIXED_POINTS:
             ranges.append((label, "#38bdf8", debug_point_box(x, y)))
+        for index, box in enumerate(MAIN_TOP_BAR_BLOCKS, start=1):
+            ranges.append((f"顶栏底色{index}", "#38bdf8", box))
         for label, x, y, _target in MAIN_TOGGLE_FIXED_POINTS:
             ranges.append((label, "#f59e0b", debug_point_box(x, y)))
         ranges.append(("右下图形兜底", "#f59e0b", MAIN_CITY_TOGGLE_ICON_BLOCK))
@@ -1515,10 +1523,26 @@ def main_avatar_frame_visible(image: Image.Image) -> bool:
     return adb_fixed_point_hits(image, MAIN_AVATAR_FIXED_POINTS) == len(MAIN_AVATAR_FIXED_POINTS)
 
 
+def main_top_bar_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        20 <= red <= 80
+        and 40 <= green <= 95
+        and 65 <= blue <= 125
+        and blue >= red + 25
+        and blue >= green + 10
+    )
+
+
 def main_top_bar_anchor_visible(image: Image.Image) -> bool:
     if image.size != (ADB_REF_WIDTH, ADB_REF_HEIGHT):
         return True
-    return adb_fixed_point_hits(image, MAIN_TOP_FIXED_POINTS) == len(MAIN_TOP_FIXED_POINTS)
+
+    fixed_hits = adb_fixed_point_hits(image, MAIN_TOP_FIXED_POINTS)
+    if fixed_hits == len(MAIN_TOP_FIXED_POINTS):
+        return True
+
+    block_hits = sum(1 for box in MAIN_TOP_BAR_BLOCKS if adb_box_ratio(image, box, main_top_bar_pixel) >= 0.55)
+    return fixed_hits >= 1 and block_hits >= 3
 
 
 def main_city_toggle_visible(image: Image.Image) -> bool:
