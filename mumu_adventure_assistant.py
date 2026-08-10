@@ -37,10 +37,17 @@ except Exception:  # pragma: no cover - psutil is optional at runtime.
     psutil = None
 
 
-CONTROL_HEIGHT = 240
+CONTROL_HEIGHT = 280
+COLLAPSED_CONTROL_HEIGHT = 40
 REFRESH_MS = 900
 TASK_BUFFER_SECONDS = 3
 TASK_STEP_TIMEOUT_SECONDS = 60
+ADVENTURE_LOOP_INTERVAL_SECONDS = 4 * 60 * 60
+SOLDIER_LOOP_FALLBACK_SECONDS = 5 * 60
+SOLDIER_LOOP_COMPLETE_DELAY_SECONDS = 5
+DEFAULT_PANEL_OPACITY = 92
+MIN_PANEL_OPACITY = 55
+MAX_PANEL_OPACITY = 100
 AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS = 60
 AUTO_ASSIST_MIN_INTERVAL_SECONDS = 5
 AUTO_ASSIST_MAX_INTERVAL_SECONDS = 60
@@ -84,7 +91,7 @@ ADB_TAP_POINTS = {
     "soldier_building": (335, 705),
     "building_train": (480, 855),
     "soldier_train": (535, 1115),
-    "auto_assist": (545, 1092),
+    "auto_assist": (535, 1138),
 }
 
 WINDOW_CLICK_POINTS = {
@@ -99,7 +106,7 @@ WINDOW_CLICK_POINTS = {
     "soldier_building": (0.465, 0.55),
     "building_train": (0.67, 0.67),
     "soldier_train": (0.74, 0.88),
-    "auto_assist": (0.76, 0.855),
+    "auto_assist": (0.743, 0.889),
 }
 
 DEBUG_DIR = Path("debug_captures")
@@ -293,6 +300,7 @@ GW_OWNER = 4
 SW_RESTORE = 9
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+HWND_TOP = wintypes.HWND(0)
 HWND_TOPMOST = wintypes.HWND(-1)
 HWND_NOTOPMOST = wintypes.HWND(-2)
 SWP_NOACTIVATE = 0x0010
@@ -531,6 +539,8 @@ def default_panel_settings() -> dict:
         "tasks": {task_key: True for task_key, _task_label in TASK_DEFINITIONS},
         "assist_interval": AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS,
         "debug_ranges": False,
+        "expanded": False,
+        "opacity": DEFAULT_PANEL_OPACITY,
     }
 
 
@@ -2562,7 +2572,7 @@ class App:
             hwnd = int(user32.GetAncestor(int(self.root.winfo_id()), GA_ROOT))
         if not hwnd:
             hwnd = int(self.root.winfo_id())
-        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, left, top, width, height, SWP_NOACTIVATE)
+        user32.SetWindowPos(hwnd, HWND_TOP, left, top, width, height, SWP_NOACTIVATE)
 
     def selected_window(self) -> TargetWindow | None:
         label = self.target_var.get()
@@ -2766,6 +2776,7 @@ class DebugRangeOverlay:
 class TargetPanel:
     def __init__(self, app: "MultiPanelApp", root: tk.Tk, window: TargetWindow) -> None:
         self.app = app
+        self.root = root
         self.window = window
         self.saved_settings = app.panel_settings(window)
         self.settings_ready = False
@@ -2774,10 +2785,21 @@ class TargetPanel:
         self.task_vars: dict[str, tk.BooleanVar] = {}
         self.task_checks: dict[str, tk.Checkbutton] = {}
         self.task_text_labels: dict[str, tk.Widget] = {}
+        self.task_countdown_vars: dict[str, tk.StringVar] = {}
+        self.soldier_loop_texts: dict[str, str] = {unit_key: "未启动" for unit_key, _unit_label, _row_y in TRAIN_UNITS}
+        self.soldier_loop_rotate_index = 0
+        self.soldier_loop_after_id: str | None = None
         self.start_btn: tk.Button | None = None
         self.stop_btn: tk.Button | None = None
         self.debug_ranges_var = tk.BooleanVar(master=root, value=bool(self.saved_settings.get("debug_ranges", False)))
         self.debug_check: tk.Checkbutton | None = None
+        self.expanded = bool(self.saved_settings.get("expanded", False))
+        self.content_top: tk.Toplevel | None = None
+        self.content_frame: tk.Frame | None = None
+        self.toggle_btn: tk.Button | None = None
+        self.opacity_value = int(self.saved_settings.get("opacity", DEFAULT_PANEL_OPACITY))
+        self.opacity_value = max(MIN_PANEL_OPACITY, min(MAX_PANEL_OPACITY, self.opacity_value))
+        self.opacity_var = tk.IntVar(master=root, value=self.opacity_value)
         try:
             self.assist_interval_value = int(
                 self.saved_settings.get("assist_interval", AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS)
@@ -2789,9 +2811,6 @@ class TargetPanel:
             min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, self.assist_interval_value),
         )
         self.assist_interval_var = tk.IntVar(master=root, value=self.assist_interval_value)
-        self.auto_assist_countdown_var = tk.StringVar(master=root, value="")
-        self.auto_assist_countdown_label: tk.Label | None = None
-        self.auto_assist_countdown_active = False
         self.assist_interval_spin: tk.Spinbox | None = None
         self.debug_overlay: DebugRangeOverlay | None = None
         self.debug_ranges: list[DebugRange] = debug_ranges_for_step("home")
@@ -2810,23 +2829,39 @@ class TargetPanel:
         self.top.title(self.title_summary())
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", False)
+        self.top.attributes("-alpha", self.opacity_value / 100)
         self.top.configure(bg="#1f2937")
         self.top.protocol("WM_DELETE_WINDOW", app.close)
 
         self._drag_start: tuple[int, int] | None = None
         self.build_ui()
         self.attach()
-        if self.debug_ranges_var.get():
+        if self.debug_ranges_var.get() and self.expanded:
             self.toggle_debug_ranges()
 
     def build_ui(self) -> None:
         self.top.columnconfigure(0, weight=1)
 
-        title_bar = tk.Frame(self.top, bg="#111827", height=30)
+        title_bar = tk.Frame(self.top, bg="#111827", height=COLLAPSED_CONTROL_HEIGHT)
         title_bar.grid(row=0, column=0, sticky="ew")
-        title_bar.grid_columnconfigure(0, weight=1)
+        title_bar.grid_propagate(False)
+        title_bar.grid_columnconfigure(1, weight=1)
         title_bar.bind("<ButtonPress-1>", self.start_drag)
         title_bar.bind("<B1-Motion>", self.drag_panel)
+
+        self.toggle_btn = tk.Button(
+            title_bar,
+            text="收起" if self.expanded else "展开",
+            command=self.toggle_expanded,
+            bd=0,
+            bg="#111827",
+            fg="#bfdbfe",
+            activebackground="#1f2937",
+            activeforeground="#ffffff",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            width=5,
+        )
+        self.toggle_btn.grid(row=0, column=0, padx=(8, 2), pady=4, sticky="w")
 
         self.title_label = tk.Label(
             title_bar,
@@ -2836,9 +2871,41 @@ class TargetPanel:
             font=("Microsoft YaHei UI", 10, "bold"),
             anchor="w",
         )
-        self.title_label.grid(row=0, column=0, padx=(10, 8), pady=5, sticky="w")
+        self.title_label.grid(row=0, column=1, padx=(4, 8), pady=5, sticky="ew")
         self.title_label.bind("<ButtonPress-1>", self.start_drag)
         self.title_label.bind("<B1-Motion>", self.drag_panel)
+
+        self.start_btn = tk.Button(
+            title_bar,
+            text="开始任务",
+            command=lambda: self.app.start_panel_tasks(self),
+            bg="#16a34a",
+            fg="#ffffff",
+            activebackground="#15803d",
+            activeforeground="#ffffff",
+            bd=0,
+            padx=8,
+            pady=4,
+            width=8,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self.start_btn.grid(row=0, column=2, sticky="e", padx=(0, 6), pady=4)
+
+        self.stop_btn = tk.Button(
+            title_bar,
+            text="停止任务",
+            command=self.app.stop_all_tasks,
+            bg="#dc2626",
+            fg="#ffffff",
+            activebackground="#b91c1c",
+            activeforeground="#ffffff",
+            bd=0,
+            padx=8,
+            pady=4,
+            width=8,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self.stop_btn.grid(row=0, column=3, sticky="e", padx=(0, 6), pady=4)
 
         close_btn = tk.Button(
             title_bar,
@@ -2852,24 +2919,26 @@ class TargetPanel:
             font=("Microsoft YaHei UI", 13, "bold"),
             width=3,
         )
-        close_btn.grid(row=0, column=1, sticky="e")
+        close_btn.grid(row=0, column=4, sticky="e")
 
-        tasks = tk.Frame(self.top, bg="#1f2937")
-        tasks.grid(row=1, column=0, sticky="ew", padx=10, pady=(8, 6))
-        tasks.columnconfigure(0, weight=1)
-        tasks.columnconfigure(1, weight=0)
+        self.content_top = tk.Toplevel(self.root)
+        self.content_top.withdraw()
+        self.content_top.title(f"{self.title_summary()} | 展开内容")
+        self.content_top.overrideredirect(True)
+        self.content_top.attributes("-topmost", False)
+        self.content_top.attributes("-alpha", self.opacity_value / 100)
+        self.content_top.configure(bg="#1f2937")
+        self.content_top.protocol("WM_DELETE_WINDOW", self.app.close)
+        self.content_top.columnconfigure(0, weight=1)
+        self.content_top.rowconfigure(0, weight=1)
 
-        task_grid = tk.Frame(tasks, bg="#1f2937")
-        task_grid.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        task_grid.columnconfigure(0, minsize=130, weight=0)
-        task_grid.columnconfigure(1, minsize=130, weight=0)
-        task_grid.columnconfigure(2, weight=1)
+        self.content_frame = tk.Frame(self.content_top, bg="#1f2937")
+        self.content_frame.grid(row=0, column=0, sticky="nsew")
+        self.content_frame.columnconfigure(0, weight=1)
 
-        task_positions = {
-            "adventure": (0, 0),
-            "auto_assist": (0, 1),
-            "train_soldiers": (1, 0),
-        }
+        task_grid = tk.Frame(self.content_frame, bg="#1f2937")
+        task_grid.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))
+        task_grid.columnconfigure(0, weight=1)
 
         saved_tasks = self.saved_settings.get("tasks", {})
         if not isinstance(saved_tasks, dict):
@@ -2878,61 +2947,63 @@ class TargetPanel:
 
         for index, (task_key, task_label) in enumerate(TASK_DEFINITIONS):
             var = tk.BooleanVar(master=self.top, value=bool(saved_tasks.get(task_key, default_tasks.get(task_key, True))))
-            row, column = task_positions.get(task_key, (1 + index // 3, index % 3))
+            task_cell = tk.Frame(task_grid, bg="#1f2937")
+            task_cell.grid(row=index, column=0, sticky="ew", pady=3)
+            task_cell.columnconfigure(1, weight=1)
+
+            check = tk.Checkbutton(
+                task_cell,
+                text="",
+                variable=var,
+                indicatoron=True,
+                bg="#1f2937",
+                fg="#d1d5db",
+                selectcolor="#111827",
+                activebackground="#1f2937",
+                activeforeground="#ffffff",
+                font=("Microsoft YaHei UI", 10, "bold"),
+                anchor="w",
+                width=1,
+                command=self.save_settings,
+            )
+            check.grid(row=0, column=0, sticky="w")
+
+            label = tk.Label(
+                task_cell,
+                text=f"[循环] {task_label}",
+                bg="#1f2937",
+                fg="#d1d5db",
+                font=("Microsoft YaHei UI", 10, "bold"),
+                cursor="hand2" if task_key == "train_soldiers" else "",
+                anchor="w",
+            )
+            label.grid(row=0, column=1, sticky="w", padx=(4, 6))
             if task_key == "train_soldiers":
-                row_frame = tk.Frame(task_grid, bg="#1f2937")
-                row_frame.grid(row=row, column=column, sticky="ew", padx=(0, 10), pady=3)
-                row_frame.columnconfigure(1, weight=1)
-                check = tk.Checkbutton(
-                    row_frame,
-                    text="",
-                    variable=var,
-                    indicatoron=True,
-                    bg="#1f2937",
-                    fg="#d1d5db",
-                    selectcolor="#111827",
-                    activebackground="#1f2937",
-                    activeforeground="#ffffff",
-                    font=("Microsoft YaHei UI", 10, "bold"),
-                    anchor="w",
-                    width=1,
-                    command=self.save_settings,
-                )
-                check.grid(row=0, column=0, sticky="w")
-                label = tk.Label(
-                    row_frame,
-                    text=task_label,
-                    bg="#1f2937",
-                    fg="#d1d5db",
-                    font=("Microsoft YaHei UI", 10, "bold"),
-                    cursor="hand2",
-                    anchor="w",
-                )
-                label.grid(row=0, column=1, sticky="w", padx=(4, 0))
                 label.bind("<Button-1>", self.open_soldier_status_popup)
                 self.task_text_labels[task_key] = label
-            else:
-                check = tk.Checkbutton(
-                    task_grid,
-                    text=task_label,
-                    variable=var,
-                    indicatoron=True,
-                    bg="#1f2937",
-                    fg="#d1d5db",
-                    selectcolor="#111827",
-                    activebackground="#1f2937",
-                    activeforeground="#ffffff",
-                    font=("Microsoft YaHei UI", 10, "bold"),
-                    anchor="w",
-                    command=self.save_settings,
-                )
-                check.grid(row=row, column=column, sticky="ew", padx=(0, 10), pady=3)
+
+            countdown_var = tk.StringVar(master=self.top, value="未启动")
+            self.task_countdown_vars[task_key] = countdown_var
+            tk.Label(
+                task_cell,
+                textvariable=countdown_var,
+                bg="#1f2937",
+                fg="#93c5fd",
+                anchor="e",
+                font=("Microsoft YaHei UI", 9),
+                width=24,
+            ).grid(row=0, column=2, sticky="e")
+
             self.task_vars[task_key] = var
             self.task_checks[task_key] = check
             var.trace_add("write", lambda *_: self.save_settings())
 
+        option_row = tk.Frame(self.content_frame, bg="#1f2937")
+        option_row.grid(row=1, column=0, sticky="ew", padx=10, pady=(8, 2))
+        option_row.columnconfigure(2, weight=1)
+
         self.debug_check = tk.Checkbutton(
-            task_grid,
+            option_row,
             text="显示取色范围",
             variable=self.debug_ranges_var,
             command=self.toggle_debug_ranges,
@@ -2945,78 +3016,18 @@ class TargetPanel:
             font=("Microsoft YaHei UI", 9),
             anchor="w",
         )
-        self.debug_check.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(8, 3))
+        self.debug_check.grid(row=0, column=0, sticky="w", padx=(0, 12))
 
-        self.auto_assist_countdown_label = tk.Label(
-            task_grid,
-            textvariable=self.auto_assist_countdown_var,
-            bg="#1f2937",
-            fg="#93c5fd",
-            anchor="w",
-            font=("Microsoft YaHei UI", 9),
-        )
-        self.auto_assist_countdown_label.grid(row=0, column=2, sticky="w", padx=(0, 8), pady=3)
-
-        task_hint = tk.Label(
-            task_grid,
-            textvariable=self.task_hint_var,
-            bg="#1f2937",
-            fg="#d1d5db",
-            justify="left",
-            anchor="w",
-            wraplength=420,
-            font=("Microsoft YaHei UI", 9),
-        )
-        task_hint.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(0, 8), pady=(8, 3))
-
-        controls = tk.Frame(tasks, bg="#1f2937")
-        controls.grid(row=0, column=1, sticky="ne")
-        controls.columnconfigure(0, weight=0)
-        controls.columnconfigure(1, weight=0)
-
-        self.start_btn = tk.Button(
-            controls,
-            text="开始任务",
-            command=lambda: self.app.start_panel_tasks(self),
-            bg="#16a34a",
-            fg="#ffffff",
-            activebackground="#15803d",
-            activeforeground="#ffffff",
-            bd=0,
-            padx=8,
-            pady=6,
-            width=8,
-            font=("Microsoft YaHei UI", 9, "bold"),
-        )
-        self.start_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=3)
-
-        self.stop_btn = tk.Button(
-            controls,
-            text="停止",
-            command=self.app.stop_all_tasks,
-            bg="#dc2626",
-            fg="#ffffff",
-            activebackground="#b91c1c",
-            activeforeground="#ffffff",
-            bd=0,
-            padx=8,
-            pady=6,
-            width=5,
-            font=("Microsoft YaHei UI", 9, "bold"),
-        )
-        self.stop_btn.grid(row=0, column=1, sticky="ew", pady=3)
-
-        interval_frame = tk.Frame(controls, bg="#1f2937")
-        interval_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 3))
+        interval_frame = tk.Frame(option_row, bg="#1f2937")
+        interval_frame.grid(row=0, column=1, sticky="w", padx=(0, 18))
         interval_frame.columnconfigure(1, weight=1)
-        interval_label = tk.Label(
+        tk.Label(
             interval_frame,
             text="协助间隔",
             bg="#1f2937",
             fg="#d1d5db",
             font=("Microsoft YaHei UI", 9),
-        )
-        interval_label.grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ).grid(row=0, column=0, sticky="w", padx=(0, 6))
         self.assist_interval_spin = tk.Spinbox(
             interval_frame,
             from_=AUTO_ASSIST_MIN_INTERVAL_SECONDS,
@@ -3031,18 +3042,56 @@ class TargetPanel:
             font=("Microsoft YaHei UI", 9),
         )
         self.assist_interval_spin.grid(row=0, column=1, sticky="ew")
-        interval_unit = tk.Label(
+        tk.Label(
             interval_frame,
             text="秒",
             bg="#1f2937",
             fg="#9ca3af",
             font=("Microsoft YaHei UI", 9),
+        ).grid(row=0, column=2, sticky="e", padx=(6, 0))
+
+        opacity_frame = tk.Frame(option_row, bg="#1f2937")
+        opacity_frame.grid(row=0, column=2, sticky="ew")
+        opacity_frame.columnconfigure(1, weight=1)
+        tk.Label(
+            opacity_frame,
+            text="透明度",
+            bg="#1f2937",
+            fg="#d1d5db",
+            font=("Microsoft YaHei UI", 9),
+        ).grid(row=0, column=0, sticky="w", padx=(0, 6))
+        tk.Scale(
+            opacity_frame,
+            from_=MIN_PANEL_OPACITY,
+            to=MAX_PANEL_OPACITY,
+            orient="horizontal",
+            variable=self.opacity_var,
+            showvalue=True,
+            bg="#1f2937",
+            fg="#d1d5db",
+            troughcolor="#111827",
+            highlightthickness=0,
+            length=150,
+            command=lambda _value: self.on_opacity_changed(),
+        ).grid(row=0, column=1, sticky="ew")
+
+        task_hint = tk.Label(
+            self.content_frame,
+            textvariable=self.task_hint_var,
+            bg="#1f2937",
+            fg="#d1d5db",
+            justify="left",
+            anchor="w",
+            wraplength=620,
+            font=("Microsoft YaHei UI", 9),
         )
-        interval_unit.grid(row=0, column=2, sticky="e", padx=(6, 0))
+        task_hint.grid(row=2, column=0, sticky="ew", padx=10, pady=(8, 6))
 
         self.assist_interval_var.trace_add("write", lambda *_: self.on_assist_interval_changed())
+        self.opacity_var.trace_add("write", lambda *_: self.on_opacity_changed())
         self.settings_ready = True
-        self.sync_auto_assist_countdown_label()
+        self.sync_loop_countdown_labels()
+        self.apply_expanded_state()
 
     def title_summary(self) -> str:
         index = self.window.vm_index or "?"
@@ -3053,8 +3102,45 @@ class TargetPanel:
         self.window = window
         self.top.title(self.title_summary())
         self.title_label.configure(text=self.title_summary())
+        if self.content_top is not None:
+            self.content_top.title(f"{self.title_summary()} | 展开内容")
         self.attach()
         self.refresh_debug_overlay()
+
+    def current_control_height(self) -> int:
+        return COLLAPSED_CONTROL_HEIGHT
+
+    def apply_window_alpha(self) -> None:
+        self.opacity_value = max(MIN_PANEL_OPACITY, min(MAX_PANEL_OPACITY, int(self.opacity_var.get())))
+        self.top.attributes("-alpha", self.opacity_value / 100)
+        if self.content_top is not None:
+            self.content_top.attributes("-alpha", self.opacity_value / 100)
+
+    def apply_expanded_state(self) -> None:
+        if self.toggle_btn is not None:
+            self.toggle_btn.configure(text="收起" if self.expanded else "展开")
+        if not self.expanded:
+            if self.content_top is not None:
+                self.content_top.withdraw()
+            self.hide_debug_overlay()
+        self.attach()
+
+    def toggle_expanded(self) -> None:
+        self.expanded = not self.expanded
+        self.apply_expanded_state()
+        if self.expanded and self.debug_ranges_var.get():
+            if self.debug_overlay is None:
+                self.debug_overlay = DebugRangeOverlay(self.top, self.window)
+            self.debug_overlay.set_ranges(self.debug_ranges)
+            self.debug_overlay.refresh()
+        self.save_settings()
+
+    def on_opacity_changed(self) -> None:
+        try:
+            self.apply_window_alpha()
+        except tk.TclError:
+            return
+        self.save_settings()
 
     def start_drag(self, event) -> None:
         self._drag_start = (event.x_root - self.top.winfo_x(), event.y_root - self.top.winfo_y())
@@ -3068,19 +3154,54 @@ class TargetPanel:
     def attach(self) -> None:
         rect = get_window_rect(self.window.hwnd) or self.window.rect
         left = rect.left
-        top = max(0, rect.top - CONTROL_HEIGHT)
-        width = max(360, rect.width)
-        self.set_geometry(width, CONTROL_HEIGHT, left, top)
+        top = max(0, rect.top - COLLAPSED_CONTROL_HEIGHT)
+        width = max(520, rect.width)
+        self.set_geometry(width, COLLAPSED_CONTROL_HEIGHT, left, top)
+
+        if self.content_top is not None:
+            if self.expanded:
+                content_rect = self.expanded_content_rect(rect)
+                self.content_top.deiconify()
+                self.set_geometry(
+                    content_rect.width,
+                    content_rect.height,
+                    content_rect.left,
+                    content_rect.top,
+                    window=self.content_top,
+                )
+            else:
+                self.content_top.withdraw()
         self.refresh_debug_overlay()
 
-    def set_geometry(self, width: int, height: int, left: int, top: int) -> None:
-        self.top.geometry(f"{width}x{height}+{left}+{top}")
-        self.top.update_idletasks()
-        hwnd = find_top_window_by_pid_and_title(os.getpid(), self.top.title())
-        if not hwnd:
-            hwnd = int(user32.GetAncestor(int(self.top.winfo_id()), GA_ROOT))
-        if not hwnd:
-            hwnd = int(self.top.winfo_id())
+    def expanded_content_rect(self, fallback_rect: Rect) -> Rect:
+        content_rect = get_emulator_content_rect(self.window.hwnd) or fallback_rect
+        left = content_rect.left
+        top = content_rect.top
+        width = max(720, fallback_rect.width, content_rect.width)
+        height = max(CONTROL_HEIGHT, content_rect.height)
+
+        screen_w = user32.GetSystemMetrics(0)
+        screen_h = user32.GetSystemMetrics(1)
+        if screen_w > left:
+            width = min(width, max(360, screen_w - left))
+        if screen_h > top:
+            height = min(height, max(CONTROL_HEIGHT, screen_h - top))
+        return Rect(left, top, left + width, top + height)
+
+    def set_geometry(
+        self,
+        width: int,
+        height: int,
+        left: int,
+        top: int,
+        window: tk.Toplevel | None = None,
+    ) -> None:
+        target = window or self.top
+        target.geometry(f"{width}x{height}+{left}+{top}")
+        target.update_idletasks()
+        hwnd = tk_top_hwnd(target)
+        target.lift()
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, left, top, width, height, SWP_NOACTIVATE)
         user32.SetWindowPos(hwnd, HWND_NOTOPMOST, left, top, width, height, SWP_NOACTIVATE)
 
     def current_task_label(self) -> str:
@@ -3165,23 +3286,54 @@ class TargetPanel:
 
     def on_assist_interval_changed(self) -> None:
         self.assist_interval_seconds()
-        self.sync_auto_assist_countdown_label()
+        self.sync_loop_countdown_labels()
         self.save_settings()
 
-    def sync_auto_assist_countdown_label(self) -> None:
-        if self.auto_assist_countdown_active:
+    def sync_loop_countdown_labels(self) -> None:
+        self.set_task_countdown_text("adventure", f"间隔 {format_duration(ADVENTURE_LOOP_INTERVAL_SECONDS)}")
+        self.set_task_countdown_text("auto_assist", f"间隔 {self.assist_interval_seconds()} 秒")
+        self.update_soldier_loop_countdown_display()
+
+    def set_task_countdown_text(self, task_key: str, text: str) -> None:
+        var = self.task_countdown_vars.get(task_key)
+        if var is not None:
+            var.set(text)
+
+    def set_task_countdown(self, task_key: str, remaining_seconds: int | None) -> None:
+        if remaining_seconds is None:
+            if task_key == "adventure":
+                self.set_task_countdown_text(task_key, f"间隔 {format_duration(ADVENTURE_LOOP_INTERVAL_SECONDS)}")
+            elif task_key == "auto_assist":
+                self.set_task_countdown_text(task_key, f"间隔 {self.assist_interval_seconds()} 秒")
+            else:
+                self.set_task_countdown_text(task_key, "未启动")
             return
-        value = self.assist_interval_seconds()
-        self.auto_assist_countdown_var.set(f"间隔 {value} 秒")
+        remaining_seconds = max(0, int(remaining_seconds))
+        self.set_task_countdown_text(task_key, "检测中" if remaining_seconds == 0 else f"下次 {format_duration(remaining_seconds)}")
 
     def set_auto_assist_countdown(self, remaining_seconds: int | None) -> None:
-        if remaining_seconds is None:
-            self.auto_assist_countdown_active = False
-            self.sync_auto_assist_countdown_label()
+        self.set_task_countdown("auto_assist", remaining_seconds)
+
+    def set_soldier_loop_text(self, unit_key: str, text: str) -> None:
+        if unit_key in self.soldier_loop_texts:
+            self.soldier_loop_texts[unit_key] = text
+        self.update_soldier_loop_countdown_display()
+
+    def update_soldier_loop_countdown_display(self) -> None:
+        if not self.soldier_loop_texts:
+            self.set_task_countdown_text("train_soldiers", "未启动")
             return
-        self.auto_assist_countdown_active = True
-        remaining_seconds = max(0, int(remaining_seconds))
-        self.auto_assist_countdown_var.set("检测中" if remaining_seconds == 0 else f"下次 {remaining_seconds} 秒")
+        units = list(TRAIN_UNITS)
+        unit_key, unit_label, _row_y = units[self.soldier_loop_rotate_index % len(units)]
+        self.set_task_countdown_text("train_soldiers", f"{unit_label} {self.soldier_loop_texts.get(unit_key, '未启动')}")
+
+        if self.soldier_loop_after_id is None and self.top.winfo_exists():
+            self.soldier_loop_after_id = self.top.after(1500, self.rotate_soldier_loop_countdown)
+
+    def rotate_soldier_loop_countdown(self) -> None:
+        self.soldier_loop_after_id = None
+        self.soldier_loop_rotate_index = (self.soldier_loop_rotate_index + 1) % max(1, len(TRAIN_UNITS))
+        self.update_soldier_loop_countdown_display()
 
     def save_settings(self) -> None:
         if not getattr(self, "settings_ready", False):
@@ -3192,6 +3344,8 @@ class TargetPanel:
             tasks=tasks,
             assist_interval=self.assist_interval_value,
             debug_ranges=bool(self.debug_ranges_var.get()),
+            expanded=bool(self.expanded),
+            opacity=int(self.opacity_value),
         )
 
     def reset_task_states(self) -> None:
@@ -3200,7 +3354,9 @@ class TargetPanel:
         for label in self.task_text_labels.values():
             label.configure(fg="#d1d5db")
         self.task_hint_var.set("当前任务：空闲 | 状态：等待\n操作：勾选任务后点击开始任务。")
-        self.set_auto_assist_countdown(None)
+        self.soldier_loop_texts = {unit_key: "未启动" for unit_key, _unit_label, _row_y in TRAIN_UNITS}
+        self.soldier_loop_rotate_index = 0
+        self.sync_loop_countdown_labels()
 
     def mark_task_done(self, task_key: str) -> None:
         check = self.task_checks.get(task_key)
@@ -3231,9 +3387,13 @@ class TargetPanel:
         self.soldier_status_summary = ""
         self.soldier_status_loading = False
 
-        x = self.top.winfo_rootx() + 24
-        y = self.top.winfo_rooty() + CONTROL_HEIGHT + 8
-        popup.geometry(f"380x166+{x}+{y}")
+        if self.expanded and self.content_top is not None and self.content_top.winfo_viewable():
+            x = self.content_top.winfo_rootx() + 24
+            y = self.content_top.winfo_rooty() + 24
+        else:
+            x = self.top.winfo_rootx() + 24
+            y = self.top.winfo_rooty() + COLLAPSED_CONTROL_HEIGHT + 8
+        popup.geometry(f"430x166+{x}+{y}")
 
         tk.Label(
             popup,
@@ -3352,7 +3512,16 @@ class TargetPanel:
 
     def destroy(self) -> None:
         self.close_soldier_status_popup()
+        if self.soldier_loop_after_id is not None:
+            try:
+                self.top.after_cancel(self.soldier_loop_after_id)
+            except tk.TclError:
+                pass
+            self.soldier_loop_after_id = None
         self.hide_debug_overlay()
+        if self.content_top is not None and self.content_top.winfo_exists():
+            self.content_top.destroy()
+            self.content_top = None
         self.top.destroy()
 
 
@@ -3366,6 +3535,8 @@ class MultiPanelApp:
         self.settings_lock = threading.Lock()
         self.panels: dict[int, TargetPanel] = {}
         self.workers: dict[int, threading.Thread] = {}
+        self.loop_workers: dict[int, dict[str, threading.Thread]] = {}
+        self.soldier_unit_workers: dict[int, dict[str, threading.Thread]] = {}
         self.stop_events: dict[int, threading.Event] = {}
         self.timeout_events: dict[int, threading.Event] = {}
         self.watchdogs: dict[int, threading.Thread] = {}
@@ -3406,6 +3577,12 @@ class MultiPanelApp:
             min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, int(merged["assist_interval"])),
         )
         merged["debug_ranges"] = bool(saved.get("debug_ranges", merged["debug_ranges"]))
+        merged["expanded"] = bool(saved.get("expanded", merged["expanded"]))
+        try:
+            merged["opacity"] = int(saved.get("opacity", merged["opacity"]))
+        except (TypeError, ValueError):
+            pass
+        merged["opacity"] = max(MIN_PANEL_OPACITY, min(MAX_PANEL_OPACITY, int(merged["opacity"])))
         return merged
 
     def save_panel_settings(
@@ -3414,12 +3591,15 @@ class MultiPanelApp:
         tasks: dict[str, bool],
         assist_interval: int,
         debug_ranges: bool,
+        expanded: bool,
+        opacity: int,
     ) -> None:
         clean_tasks = {task_key: bool(tasks.get(task_key, True)) for task_key, _label in TASK_DEFINITIONS}
         assist_interval = max(
             AUTO_ASSIST_MIN_INTERVAL_SECONDS,
             min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, int(assist_interval)),
         )
+        opacity = max(MIN_PANEL_OPACITY, min(MAX_PANEL_OPACITY, int(opacity)))
         with self.settings_lock:
             windows = self.settings.setdefault("windows", {})
             if not isinstance(windows, dict):
@@ -3429,6 +3609,8 @@ class MultiPanelApp:
                 "tasks": clean_tasks,
                 "assist_interval": assist_interval,
                 "debug_ranges": bool(debug_ranges),
+                "expanded": bool(expanded),
+                "opacity": opacity,
                 "title": window.title,
                 "adb_serial": window.adb_serial,
             }
@@ -3485,18 +3667,6 @@ class MultiPanelApp:
 
     def start_worker(self, panel: TargetPanel, task_keys: list[str], assist_interval: int) -> None:
         hwnd = panel.window.hwnd
-        existing_worker = self.workers.get(hwnd)
-        existing_assist_worker = self.auto_assist_workers.get(hwnd)
-        one_time_task_keys = [task_key for task_key in task_keys if task_key != "auto_assist"]
-        auto_assist_selected = "auto_assist" in task_keys
-
-        if one_time_task_keys and existing_worker and existing_worker.is_alive():
-            panel.log("任务正在执行中，请稍等。")
-            return
-        if auto_assist_selected and existing_assist_worker and existing_assist_worker.is_alive() and not one_time_task_keys:
-            panel.log("自动协助已经在循环检测中。")
-            return
-
         stop_event = self.stop_events.get(hwnd)
         if stop_event is None or stop_event.is_set():
             stop_event = threading.Event()
@@ -3518,24 +3688,94 @@ class MultiPanelApp:
             self.watchdogs[hwnd] = watchdog
             watchdog.start()
 
-        if one_time_task_keys:
-            panel.set_busy(True)
-            worker = threading.Thread(
-                target=self.worker_main,
-                args=(panel.window, one_time_task_keys, stop_event, timeout_event),
-                daemon=True,
-            )
-            self.workers[hwnd] = worker
-            worker.start()
-        if auto_assist_selected and not (existing_assist_worker and existing_assist_worker.is_alive()):
-            assist_worker = threading.Thread(
-                target=self.auto_assist_loop,
-                args=(panel.window, stop_event, timeout_event, assist_interval),
-                daemon=True,
-            )
-            self.auto_assist_workers[hwnd] = assist_worker
-            assist_worker.start()
-            panel.log("自动协助循环已启动。")
+        task_labels = dict(TASK_DEFINITIONS)
+        handlers = self.task_handlers()
+        started = 0
+
+        if "adventure" in task_keys:
+            if self.start_periodic_loop_worker(
+                panel.window,
+                "adventure",
+                task_labels["adventure"],
+                handlers["adventure"],
+                ADVENTURE_LOOP_INTERVAL_SECONDS,
+                stop_event,
+                timeout_event,
+            ):
+                started += 1
+
+        if "auto_assist" in task_keys:
+            if self.start_periodic_loop_worker(
+                panel.window,
+                "auto_assist",
+                task_labels["auto_assist"],
+                handlers["auto_assist"],
+                assist_interval,
+                stop_event,
+                timeout_event,
+            ):
+                started += 1
+
+        if "train_soldiers" in task_keys:
+            for unit_key, unit_label, row_y in TRAIN_UNITS:
+                if self.start_soldier_unit_loop_worker(
+                    panel.window,
+                    unit_key,
+                    unit_label,
+                    row_y,
+                    stop_event,
+                    timeout_event,
+                ):
+                    started += 1
+
+        panel.log("循环任务已启动。" if started else "勾选的循环任务已经在运行中。")
+
+    def start_periodic_loop_worker(
+        self,
+        window: TargetWindow,
+        task_key: str,
+        task_label: str,
+        handler,
+        interval_seconds: int,
+        stop_event: threading.Event,
+        timeout_event: threading.Event,
+    ) -> bool:
+        hwnd = window.hwnd
+        workers = self.loop_workers.setdefault(hwnd, {})
+        existing = workers.get(task_key)
+        if existing and existing.is_alive():
+            return False
+        worker = threading.Thread(
+            target=self.periodic_task_loop,
+            args=(window, task_key, task_label, handler, interval_seconds, stop_event, timeout_event),
+            daemon=True,
+        )
+        workers[task_key] = worker
+        worker.start()
+        return True
+
+    def start_soldier_unit_loop_worker(
+        self,
+        window: TargetWindow,
+        unit_key: str,
+        unit_label: str,
+        row_y: int,
+        stop_event: threading.Event,
+        timeout_event: threading.Event,
+    ) -> bool:
+        hwnd = window.hwnd
+        workers = self.soldier_unit_workers.setdefault(hwnd, {})
+        existing = workers.get(unit_key)
+        if existing and existing.is_alive():
+            return False
+        worker = threading.Thread(
+            target=self.soldier_unit_loop,
+            args=(window, unit_key, unit_label, row_y, stop_event, timeout_event),
+            daemon=True,
+        )
+        workers[unit_key] = worker
+        worker.start()
+        return True
 
     def stop_all_tasks(self) -> None:
         running = 0
@@ -3551,13 +3791,34 @@ class MultiPanelApp:
                 event = self.stop_events.get(hwnd)
                 if event is not None:
                     event.set()
+        for hwnd, workers in list(self.loop_workers.items()):
+            for worker in list(workers.values()):
+                if worker.is_alive():
+                    running += 1
+                    event = self.stop_events.get(hwnd)
+                    if event is not None:
+                        event.set()
+        for hwnd, workers in list(self.soldier_unit_workers.items()):
+            for worker in list(workers.values()):
+                if worker.is_alive():
+                    running += 1
+                    event = self.stop_events.get(hwnd)
+                    if event is not None:
+                        event.set()
         for panel in list(self.panels.values()):
             panel.log("已发送停止指令。" if running else "当前没有正在执行的任务。")
 
     def worker_alive(self, hwnd: int) -> bool:
         worker = self.workers.get(hwnd)
         assist_worker = self.auto_assist_workers.get(hwnd)
-        return bool((worker and worker.is_alive()) or (assist_worker and assist_worker.is_alive()))
+        loop_workers = self.loop_workers.get(hwnd, {})
+        soldier_workers = self.soldier_unit_workers.get(hwnd, {})
+        return bool(
+            (worker and worker.is_alive())
+            or (assist_worker and assist_worker.is_alive())
+            or any(worker.is_alive() for worker in loop_workers.values())
+            or any(worker.is_alive() for worker in soldier_workers.values())
+        )
 
     def cleanup_panel_if_idle(self, window: TargetWindow) -> None:
         hwnd = window.hwnd
@@ -3566,10 +3827,11 @@ class MultiPanelApp:
         stop_event = self.stop_events.get(hwnd)
         if stop_event is not None:
             stop_event.set()
-        self.set_panel_auto_assist_countdown(hwnd, None)
         self.stop_events.pop(hwnd, None)
         self.timeout_events.pop(hwnd, None)
         self.watchdogs.pop(hwnd, None)
+        self.loop_workers.pop(hwnd, None)
+        self.soldier_unit_workers.pop(hwnd, None)
         self.current_tasks.pop(hwnd, None)
         self.step_started_at.pop(hwnd, None)
         self.step_signatures.pop(hwnd, None)
@@ -3844,34 +4106,27 @@ class MultiPanelApp:
             min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, int(getattr(panel, "assist_interval_value", fallback))),
         )
 
-    def auto_assist_loop(
+    def periodic_task_loop(
         self,
         window: TargetWindow,
+        task_key: str,
+        task_label: str,
+        handler,
+        interval_seconds: int,
         stop_event: threading.Event,
         timeout_event: threading.Event,
-        initial_interval: int,
     ) -> None:
-        task_labels = dict(TASK_DEFINITIONS)
-        handler = self.task_handlers()["auto_assist"]
         hwnd = window.hwnd
         try:
             while not stop_event.is_set():
-                interval = self.panel_assist_interval(hwnd, initial_interval)
-                self.thread_log(window, f"自动协助将在 {interval} 秒后检测。")
-                for remaining in range(interval, 0, -1):
-                    if stop_event.is_set():
-                        break
-                    self.set_panel_auto_assist_countdown(hwnd, remaining)
-                    if not self.sleep_with_stop(window, 1.0):
-                        break
-                if stop_event.is_set():
-                    break
-
-                self.set_panel_auto_assist_countdown(hwnd, 0)
+                interval = interval_seconds
+                if task_key == "auto_assist":
+                    interval = self.panel_assist_interval(hwnd, interval_seconds)
+                self.set_panel_task_countdown(hwnd, task_key, 0)
                 result = self.run_one_task(
                     window,
-                    "auto_assist",
-                    task_labels["auto_assist"],
+                    task_key,
+                    task_label,
                     handler,
                     stop_event,
                     timeout_event,
@@ -3881,13 +4136,89 @@ class MultiPanelApp:
                 if result == "stopped":
                     break
                 if result == "failed":
-                    self.thread_log(window, "自动协助本轮未完成，等待下次检测。")
+                    self.thread_log(window, f"{task_label} 本轮未完成，等待下次检测。")
+
+                self.thread_log(window, f"{task_label} 将在 {format_duration(interval)} 后再次检测。")
+                for remaining in range(interval, 0, -1):
+                    if stop_event.is_set():
+                        break
+                    self.set_panel_task_countdown(hwnd, task_key, remaining)
+                    if not self.sleep_with_stop(window, 1.0):
+                        break
+                if stop_event.is_set():
+                    break
         except Exception as exc:
             traceback.print_exc()
-            self.thread_log(window, f"自动协助循环异常：{exc}")
+            self.thread_log(window, f"{task_label} 循环异常：{exc}")
         finally:
-            self.set_panel_auto_assist_countdown(hwnd, None)
-            self.auto_assist_workers.pop(hwnd, None)
+            self.set_panel_task_countdown_text(hwnd, task_key, "已停止")
+            workers = self.loop_workers.get(hwnd)
+            if workers is not None:
+                workers.pop(task_key, None)
+                if not workers:
+                    self.loop_workers.pop(hwnd, None)
+            self.cleanup_panel_if_idle(window)
+
+    def soldier_unit_loop(
+        self,
+        window: TargetWindow,
+        unit_key: str,
+        unit_label: str,
+        row_y: int,
+        stop_event: threading.Event,
+        timeout_event: threading.Event,
+    ) -> None:
+        hwnd = window.hwnd
+        try:
+            while not stop_event.is_set():
+                cached_remaining = self.cached_unit_busy_remaining(window, unit_key)
+                if cached_remaining is not None:
+                    delay = cached_remaining + SOLDIER_LOOP_COMPLETE_DELAY_SECONDS
+                    self.thread_log(window, f"{unit_label} 已在训练中，下次训练检测等待 {format_duration(delay)}。")
+                else:
+                    self.set_panel_soldier_loop_text(hwnd, unit_key, "检测中")
+                    result = self.run_one_task(
+                        window,
+                        "train_soldiers",
+                        f"训练士兵-{unit_label}",
+                        lambda target_window, key=unit_key, label=unit_label, y=row_y: self.task_train_one_soldier(
+                            target_window,
+                            key,
+                            label,
+                            y,
+                        ),
+                        stop_event,
+                        timeout_event,
+                        1,
+                        1,
+                    )
+                    if result == "stopped":
+                        break
+                    cached_remaining = self.cached_unit_busy_remaining(window, unit_key)
+                    delay = (
+                        cached_remaining + SOLDIER_LOOP_COMPLETE_DELAY_SECONDS
+                        if cached_remaining is not None
+                        else SOLDIER_LOOP_FALLBACK_SECONDS
+                    )
+                    if result == "failed":
+                        self.thread_log(window, f"{unit_label} 本轮未完成，{format_duration(delay)} 后重试。")
+
+                for remaining in range(delay, 0, -1):
+                    if stop_event.is_set():
+                        break
+                    self.set_panel_soldier_loop_text(hwnd, unit_key, f"下次 {format_duration(remaining)}")
+                    if not self.sleep_with_stop(window, 1.0):
+                        break
+        except Exception as exc:
+            traceback.print_exc()
+            self.thread_log(window, f"{unit_label} 循环异常：{exc}")
+        finally:
+            self.set_panel_soldier_loop_text(hwnd, unit_key, "已停止")
+            workers = self.soldier_unit_workers.get(hwnd)
+            if workers is not None:
+                workers.pop(unit_key, None)
+                if not workers:
+                    self.soldier_unit_workers.pop(hwnd, None)
             self.cleanup_panel_if_idle(window)
 
     def set_panel_busy(self, hwnd: int, busy: bool) -> None:
@@ -3901,12 +4232,35 @@ class MultiPanelApp:
             panel.mark_task_done(task_key)
 
     def set_panel_auto_assist_countdown(self, hwnd: int, remaining_seconds: int | None) -> None:
+        self.set_panel_task_countdown(hwnd, "auto_assist", remaining_seconds)
+
+    def set_panel_task_countdown(self, hwnd: int, task_key: str, remaining_seconds: int | None) -> None:
         panel = self.panels.get(hwnd)
         if panel is None:
             return
 
         def _apply() -> None:
-            panel.set_auto_assist_countdown(remaining_seconds)
+            panel.set_task_countdown(task_key, remaining_seconds)
+
+        self.root.after(0, _apply)
+
+    def set_panel_task_countdown_text(self, hwnd: int, task_key: str, text: str) -> None:
+        panel = self.panels.get(hwnd)
+        if panel is None:
+            return
+
+        def _apply() -> None:
+            panel.set_task_countdown_text(task_key, text)
+
+        self.root.after(0, _apply)
+
+    def set_panel_soldier_loop_text(self, hwnd: int, unit_key: str, text: str) -> None:
+        panel = self.panels.get(hwnd)
+        if panel is None:
+            return
+
+        def _apply() -> None:
+            panel.set_soldier_loop_text(unit_key, text)
 
         self.root.after(0, _apply)
 
@@ -4175,6 +4529,48 @@ class MultiPanelApp:
             attempts=8,
             interval=0.3,
         )
+        return ok
+
+    def refresh_single_soldier_status_cache(
+        self,
+        window: TargetWindow,
+        unit_key: str,
+        unit_label: str,
+        row_y: int,
+    ) -> int | None:
+        if self.should_stop(window):
+            return None
+        if not self.ensure_queue_panel(window):
+            return None
+        self.show_debug_step(window, "unit_row", unit_label=unit_label, row_y=row_y)
+        image, _profile = capture_target(window)
+        state, remaining = unit_row_status_data(image, row_y)
+        if state == "busy" and remaining is not None:
+            self.set_unit_busy_cache(window, unit_key, remaining)
+            self.thread_log(window, f"{unit_label} 已读取训练倒计时：{format_duration(remaining)}。")
+            return remaining
+        if state in {"ready", "idle", "blocked"}:
+            self.clear_unit_busy_cache(window, unit_key)
+        self.thread_log(window, f"{unit_label} 训练后状态：{unit_status_display_text(state, remaining)}。")
+        return None
+
+    def task_train_one_soldier(
+        self,
+        window: TargetWindow,
+        unit_key: str,
+        unit_label: str,
+        row_y: int,
+    ) -> bool:
+        cached_remaining = self.cached_unit_busy_remaining(window, unit_key)
+        if cached_remaining is not None:
+            self.thread_log(window, f"{unit_label} 缓存显示正在训练，剩余 {format_duration(cached_remaining)}，本轮跳过。")
+            return True
+        if not self.ensure_home_for_training(window):
+            return False
+        ok = self.train_one_unit(window, unit_key, unit_label, row_y)
+        if ok:
+            self.refresh_single_soldier_status_cache(window, unit_key, unit_label, row_y)
+            self.collapse_queue_panel_if_visible(window)
         return ok
 
     def task_train_soldiers(self, window: TargetWindow) -> bool:
