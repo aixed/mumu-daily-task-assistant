@@ -17,6 +17,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -100,6 +101,8 @@ WINDOW_CLICK_POINTS = {
 }
 
 DEBUG_DIR = Path("debug_captures")
+ASSET_DIR = Path(__file__).resolve().parent / "assets"
+BUILDING_TRAIN_ACTION_TEMPLATE = ASSET_DIR / "building_train_action_template.png"
 
 TASK_DEFINITIONS = [
     ("adventure", "探险领取"),
@@ -202,7 +205,7 @@ POPUP_CLAIM_GREEN_BLOCKS = [
     (310, 900, 410, 960),
 ]
 
-BUILDING_ACTION_SCAN_BOX = (120, 690, 610, 990)
+BUILDING_ACTION_SCAN_BOX = (90, 650, 650, 1040)
 BUILDING_ACTION_MIN_AREA = 3400
 BUILDING_ACTION_MAX_AREA = 7600
 BUILDING_ACTION_MIN_WHITE_RATIO = 0.045
@@ -906,6 +909,138 @@ def adb_color_block_hits(
     return sum(1 for box in boxes if adb_box_ratio(image, box, predicate) >= min_ratio)
 
 
+def adb_point_matches(
+    image: Image.Image,
+    x: int,
+    y: int,
+    predicate,
+) -> bool:
+    rgb_image = image if image.mode == "RGB" else image.convert("RGB")
+    px, py = adb_point_to_image(rgb_image, x, y)
+    return predicate(*rgb_image.getpixel((px, py)))
+
+
+def adb_multi_point_hits(
+    image: Image.Image,
+    points: list[tuple[int, int]],
+    predicate,
+) -> int:
+    return sum(1 for x, y in points if adb_point_matches(image, x, y, predicate))
+
+
+def adb_multi_point_visible(
+    image: Image.Image,
+    points: list[tuple[int, int]],
+    predicate,
+    min_hits: int,
+) -> bool:
+    return adb_multi_point_hits(image, points, predicate) >= min_hits
+
+
+def template_sample_kind(red: int, green: int, blue: int) -> str | None:
+    if action_icon_white_pixel(red, green, blue):
+        return "white"
+    if building_action_blue_pixel(red, green, blue) or soldier_tab_blue_pixel(red, green, blue):
+        return "blue"
+    return None
+
+
+def target_sample_matches(red: int, green: int, blue: int, kind: str) -> bool:
+    if kind == "white":
+        return action_icon_white_pixel(red, green, blue) or icon_white_pixel(red, green, blue)
+    if kind == "blue":
+        return building_action_blue_pixel(red, green, blue) or soldier_tab_blue_pixel(red, green, blue)
+    return False
+
+
+def load_image_template(path: Path, sample_step: int = 8) -> ImageTemplate | None:
+    cache_key = (str(path.resolve()), sample_step)
+    cached = _image_template_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    if not path.exists():
+        return None
+
+    image = Image.open(path).convert("RGB")
+    samples: list[tuple[int, int, str]] = []
+    for y in range(0, image.height, sample_step):
+        for x in range(0, image.width, sample_step):
+            kind = template_sample_kind(*image.getpixel((x, y)))
+            if kind is not None:
+                samples.append((x, y, kind))
+
+    if not samples:
+        return None
+    template = ImageTemplate(path=path, width=image.width, height=image.height, samples=tuple(samples))
+    _image_template_cache[cache_key] = template
+    return template
+
+
+def find_template_matches(
+    image: Image.Image,
+    template: ImageTemplate,
+    scan_box: tuple[int, int, int, int],
+    min_score: float = 0.74,
+    search_step: int = 4,
+    max_results: int = 3,
+) -> list[TemplateMatchCandidate]:
+    rgb_image = image if image.mode == "RGB" else image.convert("RGB")
+    left, top, right, bottom = adb_box_to_image(rgb_image, scan_box)
+    image_width, image_height = rgb_image.size
+    template_width = max(1, round(template.width * image_width / ADB_REF_WIDTH))
+    template_height = max(1, round(template.height * image_height / ADB_REF_HEIGHT))
+    if right - left < template_width or bottom - top < template_height:
+        return []
+
+    scaled_samples = [
+        (
+            max(0, min(template_width - 1, round(x * image_width / ADB_REF_WIDTH))),
+            max(0, min(template_height - 1, round(y * image_height / ADB_REF_HEIGHT))),
+            kind,
+        )
+        for x, y, kind in template.samples
+    ]
+    if not scaled_samples:
+        return []
+
+    raw_matches: list[TemplateMatchCandidate] = []
+    for candidate_y in range(top, bottom - template_height + 1, search_step):
+        for candidate_x in range(left, right - template_width + 1, search_step):
+            hits = 0
+            weighted_total = 0
+            for sample_x, sample_y, kind in scaled_samples:
+                weight = 2 if kind == "white" else 1
+                weighted_total += weight
+                if target_sample_matches(*rgb_image.getpixel((candidate_x + sample_x, candidate_y + sample_y)), kind):
+                    hits += weight
+            score = hits / max(1, weighted_total)
+            if score < min_score:
+                continue
+
+            box_left, box_top = image_point_to_adb(rgb_image, candidate_x, candidate_y)
+            box_right, box_bottom = image_point_to_adb(
+                rgb_image,
+                candidate_x + template_width,
+                candidate_y + template_height,
+            )
+            center = ((box_left + box_right) // 2, (box_top + box_bottom) // 2)
+            raw_matches.append(TemplateMatchCandidate(center=center, box=(box_left, box_top, box_right, box_bottom), score=score))
+
+    min_gap = max(22, min(template_width, template_height) // 2)
+    filtered_matches: list[TemplateMatchCandidate] = []
+    for match in sorted(raw_matches, key=lambda candidate: candidate.score, reverse=True):
+        if any(
+            abs(match.center[0] - existing.center[0]) < min_gap
+            and abs(match.center[1] - existing.center[1]) < min_gap
+            for existing in filtered_matches
+        ):
+            continue
+        filtered_matches.append(match)
+        if len(filtered_matches) >= max_results:
+            break
+    return filtered_matches
+
+
 def crop_relative(image: Image.Image, box: tuple[float, float, float, float]) -> Image.Image:
     width, height = image.size
     left = max(0, min(width, round(width * box[0])))
@@ -1223,6 +1358,24 @@ class BuildingActionCandidate:
     area: int
     white_ratio: float
     blue_ratio: float
+
+
+@dataclass(frozen=True)
+class ImageTemplate:
+    path: Path
+    width: int
+    height: int
+    samples: tuple[tuple[int, int, str], ...]
+
+
+@dataclass(frozen=True)
+class TemplateMatchCandidate:
+    center: tuple[int, int]
+    box: tuple[int, int, int, int]
+    score: float
+
+
+_image_template_cache: dict[tuple[str, int], ImageTemplate] = {}
 
 
 def debug_ranges_for_step(
@@ -2005,6 +2158,19 @@ def find_building_train_action(image: Image.Image) -> tuple[int, int] | None:
     if guided_action is not None:
         return guided_action
 
+    template = load_image_template(BUILDING_TRAIN_ACTION_TEMPLATE)
+    if template is not None:
+        matches = find_template_matches(
+            image,
+            template,
+            BUILDING_ACTION_SCAN_BOX,
+            min_score=0.86,
+            search_step=6,
+            max_results=1,
+        )
+        if matches:
+            return matches[0].center
+
     candidates = building_action_candidates(image)
     if not candidates:
         return None
@@ -2562,6 +2728,8 @@ class TargetPanel:
         self.soldier_status_summary_var = tk.StringVar(master=root, value="")
         self.soldier_status_row_vars: dict[str, tk.StringVar] = {}
         self.soldier_status_after_id: str | None = None
+        self.soldier_status_worker: threading.Thread | None = None
+        self.soldier_status_loading = False
 
         self.top = tk.Toplevel(root)
         self.top.title(self.title_summary())
@@ -3009,18 +3177,33 @@ class TargetPanel:
         if self.soldier_status_popup is None or not self.soldier_status_popup.winfo_exists():
             return
 
-        try:
-            status_lines, summary = self.app.read_soldier_status_lines(self.window, ensure_queue=True)
-        except Exception as exc:
-            status_lines = [(unit_label, "读取失败") for _unit_key, unit_label, _row_y in TRAIN_UNITS]
-            summary = f"错误：{exc}"
+        if not self.soldier_status_loading:
+            self.soldier_status_loading = True
+            self.soldier_status_summary_var.set("读取中...")
+            window = self.window
 
-        self.soldier_status_title_var.set(self.title_summary())
-        self.soldier_status_summary_var.set(summary)
-        for unit_label, status_text in status_lines:
-            var = self.soldier_status_row_vars.get(unit_label)
-            if var is not None:
-                var.set(status_text)
+            def _load_status() -> None:
+                try:
+                    status_lines, summary = self.app.read_soldier_status_lines(window, ensure_queue=True)
+                except Exception as exc:
+                    status_lines = [(unit_label, "读取失败") for _unit_key, unit_label, _row_y in TRAIN_UNITS]
+                    summary = f"错误：{exc}"
+
+                def _apply_status() -> None:
+                    self.soldier_status_loading = False
+                    if self.soldier_status_popup is None or not self.soldier_status_popup.winfo_exists():
+                        return
+                    self.soldier_status_title_var.set(self.title_summary())
+                    self.soldier_status_summary_var.set(summary)
+                    for unit_label, status_text in status_lines:
+                        var = self.soldier_status_row_vars.get(unit_label)
+                        if var is not None:
+                            var.set(status_text)
+
+                self.app.root.after(0, _apply_status)
+
+            self.soldier_status_worker = threading.Thread(target=_load_status, daemon=True)
+            self.soldier_status_worker.start()
 
         self.soldier_status_after_id = self.soldier_status_popup.after(1000, self.refresh_soldier_status_popup)
 
@@ -3031,6 +3214,7 @@ class TargetPanel:
             except tk.TclError:
                 pass
         self.soldier_status_after_id = None
+        self.soldier_status_loading = False
         if self.soldier_status_popup is not None and self.soldier_status_popup.winfo_exists():
             self.soldier_status_popup.destroy()
         self.soldier_status_popup = None
@@ -3042,7 +3226,9 @@ class TargetPanel:
 
 
 class MultiPanelApp:
-    def __init__(self) -> None:
+    def __init__(self, target_hwnd: int | None = None) -> None:
+        self.target_hwnd = target_hwnd
+        self.closed = False
         self.root = tk.Tk()
         self.root.withdraw()
         self.panels: dict[int, TargetPanel] = {}
@@ -3058,6 +3244,7 @@ class MultiPanelApp:
         self.follow_targets()
 
     def close(self) -> None:
+        self.closed = True
         self.stop_all_tasks()
         self.root.destroy()
 
@@ -3068,6 +3255,8 @@ class MultiPanelApp:
         if force:
             load_mumu_info(force=True)
         windows = enum_mumu_windows()
+        if self.target_hwnd is not None:
+            windows = [window for window in windows if window.hwnd == self.target_hwnd]
         live_hwnds = {window.hwnd for window in windows}
 
         for window in windows:
@@ -3082,15 +3271,17 @@ class MultiPanelApp:
                 self.panels[hwnd].destroy()
                 del self.panels[hwnd]
 
-        if not windows:
-            self.root.after(0, lambda: None)
+        if self.target_hwnd is not None and not windows and not self.panels:
+            self.closed = True
+            self.root.after(0, self.root.destroy)
         return windows
 
     def follow_targets(self) -> None:
         try:
             self.refresh_targets(force=False)
         finally:
-            self.root.after(REFRESH_MS, self.follow_targets)
+            if not self.closed:
+                self.root.after(REFRESH_MS, self.follow_targets)
 
     def start_panel_tasks(self, panel: TargetPanel) -> None:
         task_keys = panel.selected_tasks()
@@ -3276,7 +3467,28 @@ class MultiPanelApp:
         self.current_tasks[window.hwnd] = task_key
         self.note_task_step(window, f"task:{task_key}", force=True)
         self.thread_log(window, f"开始任务 {index}/{total}：{task_label}")
-        ok = handler(window)
+
+        result: dict[str, bool] = {"ok": False}
+        task_done = threading.Event()
+
+        def _run_handler() -> None:
+            try:
+                result["ok"] = bool(handler(window))
+            except Exception as exc:
+                traceback.print_exc()
+                self.thread_log(window, f"任务执行异常：{exc}")
+                result["ok"] = False
+            finally:
+                task_done.set()
+
+        task_thread = threading.Thread(target=_run_handler, daemon=True)
+        task_thread.start()
+        while not task_done.wait(0.2):
+            if stop_event.is_set() or timeout_event.is_set():
+                break
+        if not task_done.is_set() and (stop_event.is_set() or timeout_event.is_set()):
+            task_done.wait(5.0)
+        ok = result["ok"] if task_done.is_set() else False
         self.clear_current_task(window)
 
         if timeout_event.is_set():
@@ -4021,10 +4233,45 @@ class MultiPanelApp:
         return ok
 
 
+def child_python_executable() -> str:
+    current = Path(sys.executable)
+    pythonw = current.with_name("pythonw.exe")
+    return str(pythonw) if pythonw.exists() else sys.executable
+
+
+def parse_window_hwnd_arg(argv: list[str]) -> int | None:
+    if "--window-hwnd" not in argv:
+        return None
+    index = argv.index("--window-hwnd")
+    if index + 1 >= len(argv):
+        return None
+    try:
+        return int(argv[index + 1], 0)
+    except ValueError:
+        return None
+
+
+def launch_one_process_per_window() -> None:
+    load_mumu_info(force=True)
+    windows = enum_mumu_windows()
+    script_path = Path(__file__).resolve()
+    python_exe = child_python_executable()
+    for window in windows:
+        subprocess.Popen(
+            [python_exe, str(script_path), "--window-hwnd", str(window.hwnd)],
+            cwd=str(script_path.parent),
+            creationflags=CREATE_NO_WINDOW,
+        )
+
+
 def main() -> None:
     enable_dpi_awareness()
     os.chdir(Path(__file__).resolve().parent)
-    MultiPanelApp().run()
+    target_hwnd = parse_window_hwnd_arg(sys.argv)
+    if target_hwnd is None:
+        launch_one_process_per_window()
+        return
+    MultiPanelApp(target_hwnd=target_hwnd).run()
 
 
 if __name__ == "__main__":
