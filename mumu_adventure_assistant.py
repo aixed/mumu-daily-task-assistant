@@ -79,6 +79,7 @@ ADB_TAP_POINTS = {
     "reward_blank": (360, 1180),
     "back": (45, 45),
     "queue_expand": (15, 545),
+    "queue_collapse": (470, 550),
     "screen_center": (360, 640),
     "soldier_building": (335, 705),
     "building_train": (480, 855),
@@ -93,6 +94,7 @@ WINDOW_CLICK_POINTS = {
     "reward_blank": (0.50, 0.93),
     "back": (0.065, 0.075),
     "queue_expand": (0.02, 0.43),
+    "queue_collapse": (0.653, 0.43),
     "screen_center": (0.50, 0.50),
     "soldier_building": (0.465, 0.55),
     "building_train": (0.67, 0.67),
@@ -4153,6 +4155,28 @@ class MultiPanelApp:
         self.thread_log(window, "队列面板未能确认回到顶部，停止训练任务。")
         return False
 
+    def collapse_queue_panel_if_visible(self, window: TargetWindow) -> bool:
+        if self.should_stop(window):
+            self.thread_log(window, "任务已停止。")
+            return False
+
+        self.show_debug_step(window, "queue_panel")
+        image, _profile = capture_target(window)
+        if not queue_panel_visible(image):
+            return True
+
+        self.thread_log(window, "训练任务收尾：队列面板仍展开，点击收缩箭头。")
+        tap_target(window, "queue_collapse")
+        ok, _image = self.wait_for_image(
+            window,
+            lambda img: not queue_panel_visible(img),
+            "队列面板已收起。",
+            "点击收缩箭头后仍检测到队列面板，请手动确认。",
+            attempts=8,
+            interval=0.3,
+        )
+        return ok
+
     def task_train_soldiers(self, window: TargetWindow) -> bool:
         if not is_alive_window(window.hwnd):
             self.thread_log(window, "目标窗口已关闭，跳过。")
@@ -4169,6 +4193,7 @@ class MultiPanelApp:
             if not self.sleep_with_stop(window, 0.45):
                 self.thread_log(window, "任务已停止。")
                 return False
+        self.collapse_queue_panel_if_visible(window)
         self.thread_log(window, "士兵训练任务完成。")
         return True
 
