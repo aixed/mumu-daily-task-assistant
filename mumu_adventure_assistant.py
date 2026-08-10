@@ -212,6 +212,63 @@ SOLDIER_QUANTITY_BAR_BLOCK = (95, 955, 440, 1000)
 SOLDIER_TRAIN_BUTTON_BLOCK = (360, 1060, 705, 1180)
 SOLDIER_TRAIN_GUIDE_HAND_SCAN_BOX = (360, 850, 700, 1165)
 SOLDIER_QUEUE_ROW_TAP_X = 250
+QUEUE_TOP_BUILDING_ICON_BLOCK = (15, 300, 45, 335)
+QUEUE_TOP_TROOP_ICON_BLOCK = (15, 488, 45, 520)
+QUEUE_TOP_RESEARCH_ICON_BLOCK = (15, 748, 45, 782)
+QUEUE_COLLAPSE_ARROW_BLOCK = (450, 500, 490, 600)
+QUEUE_SCROLL_X = 230
+QUEUE_SCROLL_TOP_START_Y = 430
+QUEUE_SCROLL_TOP_END_Y = 835
+QUEUE_TIME_TEMPLATE_WIDTH = 8
+QUEUE_TIME_TEMPLATE_HEIGHT = 12
+QUEUE_TIME_DIGIT_TEMPLATES = {
+    "0": [
+        "001111001111111011111111110001111100001111000011110000111100001111000011110001111111111111111110",
+        "001111110111111111100011110000011100000111000001110000011100000111000001111000110111111100111110",
+        "011111101111111111000011110000111100000111000001100000011100000111000011111001110111111100111110",
+        "001111100111111111100011110000011100000111000001110000011100000111000001111000110111111100111110",
+        "001111100111111001100111111000111100001111000011110000111100001111000011011001110111111100111110",
+        "000111000011111001100111011000111100001111000011110000011100001101100011011000110111111100111110",
+    ],
+    "1": [
+        "111111111111111111111111001111110011111100111111001111110011111100111111001111110011111100111111",
+        "111111111111111100111111000011110000111100001111000011110000111100001111000011110000111100001111",
+        "000001101111111111111111000011110000111100001111000011110000111100001111000011110000111100001111",
+        "001111111111111100111111000011110000111100001111000011110000111100001111000011110000111100001111",
+        "000011111111111100111111000011110000111100001111000011110000111100001111000011110000111100001111",
+    ],
+    "2": [
+        "001111100111111101100111000000110000001100000111000001110000111000011100001110000111111111111111",
+    ],
+    "3": [
+        "011111001111111000000110000001100000011000111110001111100000011100000011000001111100111111111110",
+        "011111001111111010000111000000110000001000111110001111110000011100000011000000111110011111111110",
+    ],
+    "4": [
+        "000011100000111000011110001111100011011000100110011001100110011011111111111111110000011100000110",
+        "000011100001111000011110001111100011011000100110011001100110011011111111111111110000011000000110",
+    ],
+    "5": [
+        "111111101111111011000000110000001110000011111110000001110000001100000011100001111111111011111100",
+        "111111101111111011000000110000001110000011111110000011100000011100000111000001111111111011111100",
+        "111111101111111011100000110000001110000011111110000011110000001100000011000001111111111011111110",
+    ],
+    "6": [
+        "001111100011111101110111111000001110000011111111111111111110001111100011111000110111111101111111",
+    ],
+    "7": [
+        "111111111111111100000111000000110000011100000111000011100000110000011100000111000001100000111000",
+        "111111111111111100000110000001100000010000001100000011000001100000011000001110000011000000110000",
+    ],
+    "8": [
+        "000111100111111101100011011000010110000101111111011111110110001111000001111000010111001101111111",
+        "011111100111111111100011111000110110001101111111011001111100001111000001111000111111111101111110",
+        "011111100111111111100011111000110110001101111111011111111100001111000001110000011111111101111111",
+    ],
+    "9": [
+        "001111000111111101100111111000111110001111111111001111110000001100000011000001110111011101111110",
+    ],
+}
 
 
 user32 = ctypes.windll.user32
@@ -567,6 +624,35 @@ def adb_tap(serial: str, x: int, y: int) -> None:
     raise RuntimeError(f"ADB 点击失败：{last_error}")
 
 
+def adb_swipe(serial: str, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 420) -> None:
+    last_error = ""
+    for attempt in range(2):
+        ensure_adb_connected(serial, force=attempt > 0)
+        result = run_hidden(
+            [
+                str(MUMU_ADB_EXE),
+                "-s",
+                serial,
+                "shell",
+                "input",
+                "swipe",
+                str(int(x1)),
+                str(int(y1)),
+                str(int(x2)),
+                str(int(y2)),
+                str(int(duration_ms)),
+            ],
+            timeout=8.0,
+            text=True,
+        )
+        if result.returncode == 0:
+            return
+        last_error = (result.stderr.strip() or result.stdout.strip())
+        _adb_connected.discard(serial)
+        time.sleep(0.2)
+    raise RuntimeError(f"ADB 滑动失败：{last_error}")
+
+
 def is_alive_window(hwnd: int) -> bool:
     return bool(hwnd and user32.IsWindow(hwnd))
 
@@ -722,6 +808,30 @@ def tap_point(window: TargetWindow, x: int, y: int) -> None:
         time.sleep(0.18)
         return
     click_relative(window.hwnd, x / 720, y / 1280)
+
+
+def swipe_point(window: TargetWindow, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 420) -> None:
+    if window.adb_serial:
+        adb_swipe(window.adb_serial, x1, y1, x2, y2, duration_ms)
+        time.sleep(0.25)
+        return
+
+    rect = get_window_rect(window.hwnd)
+    if rect is None:
+        raise RuntimeError("目标窗口已经不存在")
+    start_x = rect.left + round(rect.width * x1 / ADB_REF_WIDTH)
+    start_y = rect.top + round(rect.height * y1 / ADB_REF_HEIGHT)
+    end_x = rect.left + round(rect.width * x2 / ADB_REF_WIDTH)
+    end_y = rect.top + round(rect.height * y2 / ADB_REF_HEIGHT)
+    restore_and_focus(window.hwnd)
+    user32.SetCursorPos(start_x, start_y)
+    time.sleep(0.05)
+    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, None)
+    time.sleep(duration_ms / 1000)
+    user32.SetCursorPos(end_x, end_y)
+    time.sleep(0.05)
+    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, None)
+    time.sleep(0.25)
 
 
 def adb_point_to_image(image: Image.Image, x: int, y: int) -> tuple[int, int]:
@@ -1165,9 +1275,14 @@ def debug_ranges_for_step(
 
     if step == "queue_panel":
         ranges.append(("队列面板", "#8b5cf6", (0, 220, 445, 885)))
+        ranges.append(("顶部建筑锚点", "#facc15", QUEUE_TOP_BUILDING_ICON_BLOCK))
+        ranges.append(("顶部部队锚点", "#facc15", QUEUE_TOP_TROOP_ICON_BLOCK))
+        ranges.append(("顶部科研锚点", "#facc15", QUEUE_TOP_RESEARCH_ICON_BLOCK))
+        ranges.append(("队列收起箭头", "#60a5fa", QUEUE_COLLAPSE_ARROW_BLOCK))
         for _unit_key, label, y in TRAIN_UNITS:
             ranges.append((f"{label}状态", "#c084fc", (375, y - 34, 430, y + 34)))
             ranges.append((f"{label}倒计时", "#c084fc", (75, y - 24, 370, y + 24)))
+            ranges.append((f"{label}进度条", "#22c55e", (75, y + 6, 370, y + 28)))
         return ranges
 
     if step == "unit_row" and row_y is not None:
@@ -1175,6 +1290,7 @@ def debug_ranges_for_step(
         return [
             (f"{label}状态", "#c084fc", (375, row_y - 34, 430, row_y + 34)),
             (f"{label}倒计时", "#c084fc", (75, row_y - 24, 370, row_y + 24)),
+            (f"{label}进度条", "#22c55e", (75, row_y + 6, 370, row_y + 28)),
         ]
 
     if step == "building_train":
@@ -1220,6 +1336,145 @@ def queue_panel_visible(image: Image.Image) -> bool:
     )
     known_rows = sum(1 for _unit_key, _unit_label, row_y in TRAIN_UNITS if unit_row_state(image, row_y) != "unknown")
     return density >= 0.35 and known_rows >= 2
+
+
+def queue_anchor_light_pixel(red: int, green: int, blue: int) -> bool:
+    return red >= 180 and green >= 180 and blue >= 180
+
+
+def queue_panel_at_top_visible(image: Image.Image) -> bool:
+    if not queue_panel_visible(image):
+        return False
+
+    building_ratio = adb_box_ratio(image, QUEUE_TOP_BUILDING_ICON_BLOCK, queue_anchor_light_pixel)
+    troop_ratio = adb_box_ratio(image, QUEUE_TOP_TROOP_ICON_BLOCK, queue_anchor_light_pixel)
+    research_ratio = adb_box_ratio(image, QUEUE_TOP_RESEARCH_ICON_BLOCK, queue_anchor_light_pixel)
+    collapse_white_ratio = adb_box_ratio(image, QUEUE_COLLAPSE_ARROW_BLOCK, icon_white_pixel)
+    collapse_blue_ratio = adb_box_ratio(image, QUEUE_COLLAPSE_ARROW_BLOCK, nav_blue_pixel)
+    known_rows = sum(1 for _unit_key, _unit_label, row_y in TRAIN_UNITS if unit_row_state(image, row_y) != "unknown")
+
+    return (
+        building_ratio >= 0.18
+        and troop_ratio >= 0.15
+        and research_ratio >= 0.08
+        and collapse_white_ratio >= 0.12
+        and collapse_blue_ratio >= 0.20
+        and known_rows >= 2
+    )
+
+
+def queue_progress_green_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        10 <= red <= 90
+        and 110 <= green <= 230
+        and blue <= 130
+        and green >= red + 60
+        and green >= blue + 35
+    )
+
+
+def queue_progress_bar_visible(image: Image.Image, row_y: int) -> bool:
+    progress_box = adb_box(75, row_y + 6, 370, row_y + 28)
+    green_density = box_density(image, progress_box, queue_progress_green_pixel)
+    time_box = adb_box(150, row_y + 2, 365, row_y + 31)
+    time_density = box_density(image, time_box, queue_time_foreground_pixel)
+    return green_density >= 0.055 and time_density >= 0.010
+
+
+def queue_time_foreground_pixel(red: int, green: int, blue: int) -> bool:
+    white_digit = red >= 205 and green >= 205 and blue >= 205
+    orange_digit = red >= 185 and 80 <= green <= 185 and blue <= 105 and red >= green + 35
+    return white_digit or orange_digit
+
+
+def queue_time_digit_runs(crop: Image.Image) -> list[tuple[int, int, int, int, int]]:
+    crop = crop.convert("RGB")
+    columns = [
+        sum(1 for y in range(crop.height) if queue_time_foreground_pixel(*crop.getpixel((x, y))))
+        for x in range(crop.width)
+    ]
+    runs: list[tuple[int, int, int, int, int]] = []
+    in_run = False
+    start = 0
+    for index, count in enumerate(columns):
+        if count > 0 and not in_run:
+            start = index
+            in_run = True
+        if in_run and (count == 0 or index == len(columns) - 1):
+            end = index if count == 0 else index + 1
+            ys = [
+                y
+                for y in range(crop.height)
+                for x in range(start, end)
+                if queue_time_foreground_pixel(*crop.getpixel((x, y)))
+            ]
+            if ys:
+                runs.append((start, end, min(ys), max(ys) + 1, len(ys)))
+            in_run = False
+    return [run for run in runs if run[4] >= 20]
+
+
+def queue_time_digit_signature(crop: Image.Image, run: tuple[int, int, int, int, int]) -> str:
+    x1, x2, y1, y2, _area = run
+    glyph = crop.crop((x1, y1, x2, y2)).convert("RGB")
+    bits: list[str] = []
+    for yy in range(QUEUE_TIME_TEMPLATE_HEIGHT):
+        for xx in range(QUEUE_TIME_TEMPLATE_WIDTH):
+            sx1 = int(xx * glyph.width / QUEUE_TIME_TEMPLATE_WIDTH)
+            sx2 = max(sx1 + 1, int((xx + 1) * glyph.width / QUEUE_TIME_TEMPLATE_WIDTH))
+            sy1 = int(yy * glyph.height / QUEUE_TIME_TEMPLATE_HEIGHT)
+            sy2 = max(sy1 + 1, int((yy + 1) * glyph.height / QUEUE_TIME_TEMPLATE_HEIGHT))
+            hits = total = 0
+            for sy in range(sy1, min(glyph.height, sy2)):
+                for sx in range(sx1, min(glyph.width, sx2)):
+                    total += 1
+                    if queue_time_foreground_pixel(*glyph.getpixel((sx, sy))):
+                        hits += 1
+            bits.append("1" if total and hits / total >= 0.20 else "0")
+    return "".join(bits)
+
+
+def hamming_distance(left: str, right: str) -> int:
+    return sum(1 for a, b in zip(left, right) if a != b) + abs(len(left) - len(right))
+
+
+def classify_queue_time_digit(signature: str) -> str | None:
+    best_digit: str | None = None
+    best_distance = 10**9
+    for digit, templates in QUEUE_TIME_DIGIT_TEMPLATES.items():
+        for template in templates:
+            distance = hamming_distance(signature, template)
+            if distance < best_distance:
+                best_distance = distance
+                best_digit = digit
+    return best_digit if best_distance <= 28 else None
+
+
+def unit_row_remaining_seconds(image: Image.Image, row_y: int) -> int | None:
+    crop = crop_adb_box(image, (145, row_y + 2, 370, row_y + 32))
+    runs = queue_time_digit_runs(crop)
+    if len(runs) < 6:
+        return None
+    digit_runs = runs[-6:]
+    digits: list[str] = []
+    for run in digit_runs:
+        digit = classify_queue_time_digit(queue_time_digit_signature(crop, run))
+        if digit is None:
+            return None
+        digits.append(digit)
+    hours = int("".join(digits[0:2]))
+    minutes = int("".join(digits[2:4]))
+    seconds = int("".join(digits[4:6]))
+    if minutes >= 60 or seconds >= 60:
+        return None
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def format_duration(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def adb_fixed_point_visible(image: Image.Image, x: int, y: int, target: tuple[int, int, int]) -> bool:
@@ -1301,10 +1556,8 @@ def unit_upgrade_blocked_pixel(red: int, green: int, blue: int) -> bool:
 
 def unit_row_state(image: Image.Image, row_y: int) -> str:
     action_box = adb_box(375, row_y - 34, 430, row_y + 34)
-    progress_box = adb_box(75, row_y - 24, 370, row_y + 24)
     status_text_box = adb_box(155, row_y - 26, 355, row_y + 28)
 
-    black_density = box_density(image, progress_box, lambda r, g, b: r <= 45 and g <= 50 and b <= 60)
     upgrade_density = box_density(image, status_text_box, unit_upgrade_blocked_pixel)
     green_density = box_density(
         image,
@@ -1320,7 +1573,7 @@ def unit_row_state(image: Image.Image, row_y: int) -> str:
         and b >= r + 55,
     )
 
-    if black_density >= 0.16:
+    if queue_progress_bar_visible(image, row_y):
         return "busy"
     if upgrade_density >= 0.025:
         return "blocked"
@@ -2756,10 +3009,12 @@ class MultiPanelApp:
             if started_at is None:
                 continue
             elapsed = time.monotonic() - started_at
+            step = self.step_signatures.get(hwnd, "unknown")
+            if step.startswith("wait_busy:"):
+                continue
             if elapsed < TASK_STEP_TIMEOUT_SECONDS:
                 continue
             timeout_event.set()
-            step = self.step_signatures.get(hwnd, "unknown")
             self.thread_log(
                 window,
                 f"当前步骤超过 {TASK_STEP_TIMEOUT_SECONDS} 秒，强制停止本任务：{task_key} / {step}。",
@@ -2824,6 +3079,7 @@ class MultiPanelApp:
 
         if not ok:
             self.thread_log(window, f"任务未完成：{task_label}")
+            self.recover_home_after_timeout(window, stop_event)
             return "failed"
 
         self.root.after(0, lambda key=task_key, hwnd=window.hwnd: self.mark_task_done(hwnd, key))
@@ -3044,19 +3300,40 @@ class MultiPanelApp:
 
         self.show_debug_step(window, "queue_panel")
         image, _profile = capture_target(window)
-        if queue_panel_visible(image):
+        if queue_panel_at_top_visible(image):
             return True
 
-        self.thread_log(window, "展开左侧队列面板。")
-        tap_target(window, "queue_expand")
-        ok, _image = self.wait_for_image(
-            window,
-            queue_panel_visible,
-            "队列面板已展开。",
-            "未验证到队列面板展开，停止训练任务。",
-            attempts=10,
-        )
-        return ok
+        if not queue_panel_visible(image):
+            self.thread_log(window, "展开左侧队列面板。")
+            tap_target(window, "queue_expand")
+            ok, image = self.wait_for_image(
+                window,
+                queue_panel_visible,
+                "队列面板已展开。",
+                "未验证到队列面板展开，停止训练任务。",
+                attempts=10,
+            )
+            if not ok:
+                return False
+
+        for attempt in range(5):
+            if self.should_stop(window):
+                self.thread_log(window, "任务已停止。")
+                return False
+            self.show_debug_step(window, "queue_panel")
+            image, _profile = capture_target(window)
+            if queue_panel_at_top_visible(image):
+                if attempt > 0:
+                    self.thread_log(window, "队列面板已回到顶部。")
+                return True
+            self.thread_log(window, f"队列面板未在顶部，第 {attempt + 1}/5 次向下拖回顶部。")
+            swipe_point(window, QUEUE_SCROLL_X, QUEUE_SCROLL_TOP_START_Y, QUEUE_SCROLL_X, QUEUE_SCROLL_TOP_END_Y)
+            if not self.sleep_with_stop(window, 0.35):
+                self.thread_log(window, "任务已停止。")
+                return False
+
+        self.thread_log(window, "队列面板未能确认回到顶部，停止训练任务。")
+        return False
 
     def task_train_soldiers(self, window: TargetWindow) -> bool:
         if not is_alive_window(window.hwnd):
@@ -3077,34 +3354,101 @@ class MultiPanelApp:
         self.thread_log(window, "士兵训练任务完成。")
         return True
 
+    def wait_for_busy_unit(self, window: TargetWindow, unit_label: str, row_y: int, seconds: int) -> bool:
+        wait_seconds = max(0, int(seconds)) + 5
+        self.note_task_step(window, "wait_busy", unit_label=unit_label, row_y=row_y, force=True)
+        self.thread_log(
+            window,
+            f"{unit_label} 正在训练，剩余 {format_duration(seconds)}，结束后再等 5 秒重试。",
+        )
+
+        end_time = time.monotonic() + wait_seconds
+        next_log_at = time.monotonic() + 60
+        while time.monotonic() < end_time:
+            if self.should_stop(window):
+                self.thread_log(window, "任务已停止。")
+                return False
+
+            remaining = max(0, round(end_time - time.monotonic()))
+            if remaining > 0 and time.monotonic() >= next_log_at:
+                self.thread_log(window, f"{unit_label} 等待训练完成，预计还需 {format_duration(remaining)}。")
+                next_log_at += 60
+            time.sleep(min(1.0, max(0.05, end_time - time.monotonic())))
+
+        if self.should_stop(window):
+            self.thread_log(window, "任务已停止。")
+            return False
+        self.thread_log(window, f"{unit_label} 倒计时已结束，重新检测队列状态。")
+        return True
+
+    def read_busy_unit_remaining(self, window: TargetWindow, unit_label: str, row_y: int) -> int | None:
+        for attempt in range(1, 4):
+            self.show_debug_step(window, "unit_row", unit_label=unit_label, row_y=row_y)
+            image, _profile = capture_target(window)
+            if unit_row_state(image, row_y) != "busy":
+                return None
+
+            remaining = unit_row_remaining_seconds(image, row_y)
+            if remaining is not None:
+                return remaining
+
+            if attempt < 3:
+                self.thread_log(window, f"{unit_label} 正在训练，但倒计时未读准，第 {attempt + 1}/3 次重试。")
+                if not self.sleep_with_stop(window, 0.45):
+                    self.thread_log(window, "任务已停止。")
+                    return None
+
+        return None
+
     def train_one_unit(self, window: TargetWindow, unit_label: str, row_y: int) -> bool:
         if self.should_stop(window):
             self.thread_log(window, "任务已停止。")
             return False
-        if not self.ensure_queue_panel(window):
-            return False
 
-        self.show_debug_step(window, "unit_row", unit_label=unit_label, row_y=row_y)
-        image, _profile = capture_target(window)
-        state = unit_row_state(image, row_y)
-        state_text = {
-            "ready": "已完成",
-            "idle": "空闲中",
-            "busy": "训练中",
-            "blocked": "建筑升级中",
-            "unknown": "未知",
-        }.get(state, state)
-        self.thread_log(window, f"{unit_label} 当前状态：{state_text}。")
+        unreadable_busy_count = 0
+        while True:
+            if not self.ensure_queue_panel(window):
+                return False
 
-        if state == "busy":
-            self.thread_log(window, f"{unit_label} 正在训练，跳过。")
-            return True
-        if state == "blocked":
-            self.thread_log(window, f"{unit_label} 建筑升级中，跳过。")
-            return True
-        if state not in {"ready", "idle"}:
-            self.thread_log(window, f"{unit_label} 状态无法确认，跳过。")
-            return True
+            self.show_debug_step(window, "unit_row", unit_label=unit_label, row_y=row_y)
+            image, _profile = capture_target(window)
+            state = unit_row_state(image, row_y)
+            state_text = {
+                "ready": "已完成",
+                "idle": "空闲中",
+                "busy": "训练中",
+                "blocked": "建筑升级中",
+                "unknown": "未知",
+            }.get(state, state)
+            self.thread_log(window, f"{unit_label} 当前状态：{state_text}。")
+
+            if state == "busy":
+                remaining = unit_row_remaining_seconds(image, row_y)
+                if remaining is None:
+                    remaining = self.read_busy_unit_remaining(window, unit_label, row_y)
+                if remaining is None:
+                    unreadable_busy_count += 1
+                    if unreadable_busy_count >= 2:
+                        self.thread_log(window, f"{unit_label} 正在训练，但多次未能读取剩余时间，安全跳过。")
+                        return True
+                    self.thread_log(window, f"{unit_label} 倒计时未读准，重新检测该兵种状态。")
+                    if not self.sleep_with_stop(window, 0.45):
+                        self.thread_log(window, "任务已停止。")
+                        return False
+                    continue
+                unreadable_busy_count = 0
+                if not self.wait_for_busy_unit(window, unit_label, row_y, remaining):
+                    return False
+                continue
+
+            unreadable_busy_count = 0
+            if state == "blocked":
+                self.thread_log(window, f"{unit_label} 建筑升级中，跳过。")
+                return True
+            if state not in {"ready", "idle"}:
+                self.thread_log(window, f"{unit_label} 状态无法确认，跳过。")
+                return True
+            break
 
         self.thread_log(window, f"点击 {unit_label} 行。")
         tap_point(window, SOLDIER_QUEUE_ROW_TAP_X, row_y)
@@ -3178,6 +3522,20 @@ class MultiPanelApp:
                     return False
         else:
             self.thread_log(window, f"已在 {unit_label} 训练页。")
+
+        self.show_debug_step(window, "soldier_page")
+        image, _profile = capture_target(window)
+        if soldier_training_started_visible(image) and not soldier_quantity_bar_visible(image):
+            self.thread_log(window, f"{unit_label} 训练页显示已在训练，点击返回后继续下一个兵种。")
+            tap_target(window, "back")
+            ok, _image = self.wait_for_image(
+                window,
+                lambda img: not soldier_page_visible(img),
+                f"{unit_label} 已退出训练页。",
+                f"{unit_label} 返回后仍在训练页，请手动确认。",
+                attempts=10,
+            )
+            return ok
 
         self.show_debug_step(window, "train_levels")
         level_choices = list(reversed(available_train_level_xs(image)))
