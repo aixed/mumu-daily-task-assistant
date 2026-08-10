@@ -36,7 +36,7 @@ except Exception:  # pragma: no cover - psutil is optional at runtime.
     psutil = None
 
 
-CONTROL_HEIGHT = 305
+CONTROL_HEIGHT = 240
 REFRESH_MS = 900
 TASK_BUFFER_SECONDS = 3
 TASK_STEP_TIMEOUT_SECONDS = 60
@@ -2251,6 +2251,7 @@ class TargetPanel:
         self.app = app
         self.window = window
         self.status_var = tk.StringVar(master=root, value="已附加，等待操作。")
+        self.task_hint_var = tk.StringVar(master=root, value="当前任务：空闲 | 状态：等待\n操作：勾选任务后点击开始任务。")
         self.task_vars: dict[str, tk.BooleanVar] = {}
         self.task_checks: dict[str, tk.Checkbutton] = {}
         self.start_btn: tk.Button | None = None
@@ -2263,7 +2264,7 @@ class TargetPanel:
         self.debug_ranges: list[DebugRange] = debug_ranges_for_step("home")
 
         self.top = tk.Toplevel(root)
-        self.top.title(f"MuMu 探险助手 {window.hwnd:X}")
+        self.top.title(self.title_summary())
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", False)
         self.top.configure(bg="#1f2937")
@@ -2278,31 +2279,21 @@ class TargetPanel:
 
         title_bar = tk.Frame(self.top, bg="#111827", height=30)
         title_bar.grid(row=0, column=0, sticky="ew")
-        title_bar.grid_columnconfigure(1, weight=1)
+        title_bar.grid_columnconfigure(0, weight=1)
         title_bar.bind("<ButtonPress-1>", self.start_drag)
         title_bar.bind("<B1-Motion>", self.drag_panel)
 
         self.title_label = tk.Label(
             title_bar,
-            text=self.short_title(),
+            text=self.title_summary(),
             bg="#111827",
             fg="#f9fafb",
             font=("Microsoft YaHei UI", 10, "bold"),
+            anchor="w",
         )
         self.title_label.grid(row=0, column=0, padx=(10, 8), pady=5, sticky="w")
         self.title_label.bind("<ButtonPress-1>", self.start_drag)
         self.title_label.bind("<B1-Motion>", self.drag_panel)
-
-        hint = tk.Label(
-            title_bar,
-            text="附加在模拟器上方",
-            bg="#111827",
-            fg="#9ca3af",
-            font=("Microsoft YaHei UI", 9),
-        )
-        hint.grid(row=0, column=1, pady=5, sticky="w")
-        hint.bind("<ButtonPress-1>", self.start_drag)
-        hint.bind("<B1-Motion>", self.drag_panel)
 
         close_btn = tk.Button(
             title_bar,
@@ -2316,23 +2307,23 @@ class TargetPanel:
             font=("Microsoft YaHei UI", 13, "bold"),
             width=3,
         )
-        close_btn.grid(row=0, column=2, sticky="e")
-
-        meta = tk.Label(
-            self.top,
-            text=self.window.label,
-            bg="#1f2937",
-            fg="#d1d5db",
-            anchor="w",
-            font=("Microsoft YaHei UI", 9),
-        )
-        meta.grid(row=1, column=0, sticky="ew", padx=10, pady=(8, 4))
-        self.meta_label = meta
+        close_btn.grid(row=0, column=1, sticky="e")
 
         tasks = tk.Frame(self.top, bg="#1f2937")
-        tasks.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 6))
+        tasks.grid(row=1, column=0, sticky="ew", padx=10, pady=(8, 6))
         tasks.columnconfigure(0, weight=1)
-        tasks.columnconfigure(1, weight=1)
+        tasks.columnconfigure(1, weight=0)
+
+        task_grid = tk.Frame(tasks, bg="#1f2937")
+        task_grid.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        for column in range(3):
+            task_grid.columnconfigure(column, weight=1)
+
+        task_positions = {
+            "adventure": (0, 0),
+            "auto_assist": (0, 1),
+            "train_soldiers": (1, 0),
+        }
 
         for index, (task_key, task_label) in enumerate(TASK_DEFINITIONS):
             var = tk.BooleanVar(master=self.top, value=(task_key != "adventure"))
@@ -2349,12 +2340,78 @@ class TargetPanel:
                 font=("Microsoft YaHei UI", 10, "bold"),
                 anchor="w",
             )
-            check.grid(row=index, column=0, sticky="ew", padx=(0, 8), pady=3)
+            row, column = task_positions.get(task_key, (1 + index // 3, index % 3))
+            check.grid(row=row, column=column, sticky="ew", padx=(0, 10), pady=3)
             self.task_vars[task_key] = var
             self.task_checks[task_key] = check
 
-        interval_frame = tk.Frame(tasks, bg="#1f2937")
-        interval_frame.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=3)
+        self.debug_check = tk.Checkbutton(
+            task_grid,
+            text="显示取色范围",
+            variable=self.debug_ranges_var,
+            command=self.toggle_debug_ranges,
+            indicatoron=True,
+            bg="#1f2937",
+            fg="#d1d5db",
+            selectcolor="#111827",
+            activebackground="#1f2937",
+            activeforeground="#ffffff",
+            font=("Microsoft YaHei UI", 9),
+            anchor="w",
+        )
+        self.debug_check.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(8, 3))
+
+        task_hint = tk.Label(
+            task_grid,
+            textvariable=self.task_hint_var,
+            bg="#1f2937",
+            fg="#d1d5db",
+            justify="left",
+            anchor="w",
+            wraplength=420,
+            font=("Microsoft YaHei UI", 9),
+        )
+        task_hint.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(0, 8), pady=(8, 3))
+
+        controls = tk.Frame(tasks, bg="#1f2937")
+        controls.grid(row=0, column=1, sticky="ne")
+        controls.columnconfigure(0, weight=0)
+        controls.columnconfigure(1, weight=0)
+
+        self.start_btn = tk.Button(
+            controls,
+            text="开始任务",
+            command=lambda: self.app.start_panel_tasks(self),
+            bg="#16a34a",
+            fg="#ffffff",
+            activebackground="#15803d",
+            activeforeground="#ffffff",
+            bd=0,
+            padx=12,
+            pady=6,
+            width=9,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self.start_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=3)
+
+        self.stop_btn = tk.Button(
+            controls,
+            text="停止",
+            command=self.app.stop_all_tasks,
+            bg="#dc2626",
+            fg="#ffffff",
+            activebackground="#b91c1c",
+            activeforeground="#ffffff",
+            bd=0,
+            padx=12,
+            pady=6,
+            width=7,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self.stop_btn.grid(row=0, column=1, sticky="ew", pady=3)
+
+        interval_frame = tk.Frame(controls, bg="#1f2937")
+        interval_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 3))
         interval_frame.columnconfigure(1, weight=1)
         interval_label = tk.Label(
             interval_frame,
@@ -2387,71 +2444,15 @@ class TargetPanel:
         )
         interval_unit.grid(row=0, column=2, sticky="e", padx=(6, 0))
 
-        self.debug_check = tk.Checkbutton(
-            tasks,
-            text="显示取色范围",
-            variable=self.debug_ranges_var,
-            command=self.toggle_debug_ranges,
-            indicatoron=True,
-            bg="#1f2937",
-            fg="#d1d5db",
-            selectcolor="#111827",
-            activebackground="#1f2937",
-            activeforeground="#ffffff",
-            font=("Microsoft YaHei UI", 9),
-            anchor="w",
-        )
-        self.debug_check.grid(row=len(TASK_DEFINITIONS), column=0, sticky="ew", padx=(0, 8), pady=3)
-
-        self.start_btn = tk.Button(
-            tasks,
-            text="开始任务",
-            command=lambda: self.app.start_panel_tasks(self),
-            bg="#16a34a",
-            fg="#ffffff",
-            activebackground="#15803d",
-            activeforeground="#ffffff",
-            bd=0,
-            padx=8,
-            pady=8,
-            font=("Microsoft YaHei UI", 10, "bold"),
-        )
-        self.start_btn.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=3)
-
-        self.stop_btn = tk.Button(
-            tasks,
-            text="停止",
-            command=self.app.stop_all_tasks,
-            bg="#dc2626",
-            fg="#ffffff",
-            activebackground="#b91c1c",
-            activeforeground="#ffffff",
-            bd=0,
-            padx=8,
-            pady=8,
-        )
-        self.stop_btn.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=3)
-
-        status = tk.Label(
-            self.top,
-            textvariable=self.status_var,
-            bg="#111827",
-            fg="#d1d5db",
-            justify="left",
-            anchor="nw",
-            wraplength=600,
-            font=("Microsoft YaHei UI", 9),
-        )
-        status.grid(row=3, column=0, sticky="nsew", padx=10, pady=(2, 10))
-
-    def short_title(self) -> str:
+    def title_summary(self) -> str:
         index = self.window.vm_index or "?"
-        return f"{self.window.title} · index={index}"
+        adb_text = self.window.adb_serial or "未连接ADB"
+        return f"{self.window.title} | index={index} | adb={adb_text}"
 
     def update_window(self, window: TargetWindow) -> None:
         self.window = window
-        self.title_label.configure(text=self.short_title())
-        self.meta_label.configure(text=window.label)
+        self.top.title(self.title_summary())
+        self.title_label.configure(text=self.title_summary())
         self.attach()
         self.refresh_debug_overlay()
 
@@ -2482,9 +2483,34 @@ class TargetPanel:
             hwnd = int(self.top.winfo_id())
         user32.SetWindowPos(hwnd, HWND_NOTOPMOST, left, top, width, height, SWP_NOACTIVATE)
 
+    def current_task_label(self) -> str:
+        current_tasks = getattr(self.app, "current_tasks", {})
+        task_key = current_tasks.get(self.window.hwnd)
+        if not task_key:
+            return "空闲"
+        return dict(TASK_DEFINITIONS).get(task_key, task_key)
+
+    def task_status_from_message(self, text: str) -> str:
+        if any(word in text for word in ("失败", "超时", "停止", "无法", "仍", "未能", "未验证")):
+            return "异常"
+        if "跳过" in text:
+            return "跳过"
+        if any(word in text for word in ("完成", "已", "成功", "消失")):
+            return "成功"
+        return "执行中"
+
+    def update_task_hint(self, text: str) -> None:
+        operation = text.strip()
+        if len(operation) > 46:
+            operation = operation[:45] + "..."
+        task_label = self.current_task_label()
+        status = "等待" if task_label == "空闲" else self.task_status_from_message(text)
+        self.task_hint_var.set(f"当前任务：{task_label} | 状态：{status}\n操作：{operation}")
+
     def log(self, text: str) -> None:
         now = datetime.now().strftime("%H:%M:%S")
         self.status_var.set(f"[{now}] {text}")
+        self.update_task_hint(text)
 
     def set_busy(self, busy: bool) -> None:
         state = "disabled" if busy else "normal"
@@ -2535,11 +2561,14 @@ class TargetPanel:
     def reset_task_states(self) -> None:
         for check in self.task_checks.values():
             check.configure(fg="#d1d5db", activeforeground="#ffffff")
+        self.task_hint_var.set("当前任务：空闲 | 状态：等待\n操作：勾选任务后点击开始任务。")
 
     def mark_task_done(self, task_key: str) -> None:
         check = self.task_checks.get(task_key)
         if check is not None:
             check.configure(fg="#22c55e", activeforeground="#22c55e")
+        task_label = dict(TASK_DEFINITIONS).get(task_key, task_key)
+        self.task_hint_var.set(f"当前任务：{task_label} | 状态：成功\n操作：任务已完成。")
 
     def destroy(self) -> None:
         self.hide_debug_overlay()
