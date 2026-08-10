@@ -1639,9 +1639,18 @@ def format_duration(seconds: int) -> str:
 
 
 def unit_row_status_text(image: Image.Image, row_y: int) -> str:
+    state, remaining = unit_row_status_data(image, row_y)
+    return unit_status_display_text(state, remaining)
+
+
+def unit_row_status_data(image: Image.Image, row_y: int) -> tuple[str, int | None]:
     state = unit_row_state(image, row_y)
+    remaining = unit_row_remaining_seconds(image, row_y) if state == "busy" else None
+    return state, remaining
+
+
+def unit_status_display_text(state: str, remaining: int | None = None) -> str:
     if state == "busy":
-        remaining = unit_row_remaining_seconds(image, row_y)
         return f"训练中 {format_duration(remaining)}" if remaining is not None else "训练中"
     if state == "ready":
         return "已完成"
@@ -2730,6 +2739,9 @@ class TargetPanel:
         self.soldier_status_after_id: str | None = None
         self.soldier_status_worker: threading.Thread | None = None
         self.soldier_status_loading = False
+        self.soldier_status_snapshot: list[tuple[str, str, int | None]] = []
+        self.soldier_status_snapshot_at: float | None = None
+        self.soldier_status_summary = ""
 
         self.top = tk.Toplevel(root)
         self.top.title(self.title_summary())
@@ -3113,7 +3125,7 @@ class TargetPanel:
         if self.soldier_status_popup is not None and self.soldier_status_popup.winfo_exists():
             self.soldier_status_popup.deiconify()
             self.soldier_status_popup.lift()
-            self.refresh_soldier_status_popup()
+            self.update_soldier_status_popup_display()
             return "break"
 
         popup = tk.Toplevel(self.top)
@@ -3123,10 +3135,14 @@ class TargetPanel:
         popup.attributes("-topmost", False)
         popup.protocol("WM_DELETE_WINDOW", self.close_soldier_status_popup)
         self.soldier_status_popup = popup
+        self.soldier_status_snapshot = []
+        self.soldier_status_snapshot_at = None
+        self.soldier_status_summary = ""
+        self.soldier_status_loading = False
 
         x = self.top.winfo_rootx() + 24
         y = self.top.winfo_rooty() + CONTROL_HEIGHT + 8
-        popup.geometry(f"280x162+{x}+{y}")
+        popup.geometry(f"380x166+{x}+{y}")
 
         tk.Label(
             popup,
@@ -3157,7 +3173,7 @@ class TargetPanel:
                 fg="#93c5fd",
                 font=("Microsoft YaHei UI", 10, "bold"),
                 anchor="w",
-                width=18,
+                width=26,
             ).grid(row=row, column=1, sticky="w", padx=(2, 12), pady=3)
 
         tk.Label(
@@ -3177,16 +3193,16 @@ class TargetPanel:
         if self.soldier_status_popup is None or not self.soldier_status_popup.winfo_exists():
             return
 
-        if not self.soldier_status_loading:
+        if not self.soldier_status_snapshot and not self.soldier_status_loading:
             self.soldier_status_loading = True
             self.soldier_status_summary_var.set("读取中...")
             window = self.window
 
             def _load_status() -> None:
                 try:
-                    status_lines, summary = self.app.read_soldier_status_lines(window, ensure_queue=True)
+                    status_snapshot, summary = self.app.read_soldier_status_snapshot(window, ensure_queue=True)
                 except Exception as exc:
-                    status_lines = [(unit_label, "读取失败") for _unit_key, unit_label, _row_y in TRAIN_UNITS]
+                    status_snapshot = [(unit_label, "unknown", None) for _unit_key, unit_label, _row_y in TRAIN_UNITS]
                     summary = f"错误：{exc}"
 
                 def _apply_status() -> None:
@@ -3194,18 +3210,39 @@ class TargetPanel:
                     if self.soldier_status_popup is None or not self.soldier_status_popup.winfo_exists():
                         return
                     self.soldier_status_title_var.set(self.title_summary())
-                    self.soldier_status_summary_var.set(summary)
-                    for unit_label, status_text in status_lines:
-                        var = self.soldier_status_row_vars.get(unit_label)
-                        if var is not None:
-                            var.set(status_text)
+                    self.soldier_status_snapshot = status_snapshot
+                    self.soldier_status_snapshot_at = time.monotonic()
+                    self.soldier_status_summary = summary
+                    self.update_soldier_status_popup_display()
 
                 self.app.root.after(0, _apply_status)
 
             self.soldier_status_worker = threading.Thread(target=_load_status, daemon=True)
             self.soldier_status_worker.start()
+        else:
+            self.update_soldier_status_popup_display()
 
         self.soldier_status_after_id = self.soldier_status_popup.after(1000, self.refresh_soldier_status_popup)
+
+    def update_soldier_status_popup_display(self) -> None:
+        if self.soldier_status_popup is None or not self.soldier_status_popup.winfo_exists():
+            return
+
+        if not self.soldier_status_snapshot:
+            return
+
+        elapsed = 0
+        if self.soldier_status_snapshot_at is not None:
+            elapsed = max(0, int(time.monotonic() - self.soldier_status_snapshot_at))
+
+        self.soldier_status_summary_var.set(self.soldier_status_summary)
+        for unit_label, state, initial_remaining in self.soldier_status_snapshot:
+            remaining = initial_remaining
+            if state == "busy" and initial_remaining is not None:
+                remaining = max(0, initial_remaining - elapsed)
+            var = self.soldier_status_row_vars.get(unit_label)
+            if var is not None:
+                var.set(unit_status_display_text(state, remaining))
 
     def close_soldier_status_popup(self) -> None:
         if self.soldier_status_popup is not None and self.soldier_status_after_id is not None:
@@ -3215,6 +3252,9 @@ class TargetPanel:
                 pass
         self.soldier_status_after_id = None
         self.soldier_status_loading = False
+        self.soldier_status_snapshot = []
+        self.soldier_status_snapshot_at = None
+        self.soldier_status_summary = ""
         if self.soldier_status_popup is not None and self.soldier_status_popup.winfo_exists():
             self.soldier_status_popup.destroy()
         self.soldier_status_popup = None
@@ -3647,6 +3687,14 @@ class MultiPanelApp:
         window: TargetWindow,
         ensure_queue: bool = False,
     ) -> tuple[list[tuple[str, str]], str]:
+        snapshot, summary = self.read_soldier_status_snapshot(window, ensure_queue=ensure_queue)
+        return [(unit_label, unit_status_display_text(state, remaining)) for unit_label, state, remaining in snapshot], summary
+
+    def read_soldier_status_snapshot(
+        self,
+        window: TargetWindow,
+        ensure_queue: bool = False,
+    ) -> tuple[list[tuple[str, str, int | None]], str]:
         image, _profile = capture_target(window)
         if ensure_queue and main_screen_visible(image) and not queue_panel_visible(image):
             tap_target(window, "queue_expand")
@@ -3663,12 +3711,16 @@ class MultiPanelApp:
 
         if not queue_panel_visible(image):
             summary = "队列未展开"
-            lines = [(unit_label, "队列未展开") for _unit_key, unit_label, _row_y in TRAIN_UNITS]
-            return lines, summary
+            snapshot = [(unit_label, "unknown", None) for _unit_key, unit_label, _row_y in TRAIN_UNITS]
+            return snapshot, summary
 
-        summary = "队列已展开" if queue_panel_at_top_visible(image) else "队列未在顶部"
-        lines = [(unit_label, unit_row_status_text(image, row_y)) for _unit_key, unit_label, row_y in TRAIN_UNITS]
-        return lines, summary
+        top_visible = queue_panel_at_top_visible(image)
+        summary = "队列已展开，本地倒计时" if top_visible else "队列未在顶部，本地倒计时"
+        snapshot = [
+            (unit_label, *unit_row_status_data(image, row_y))
+            for _unit_key, unit_label, row_y in TRAIN_UNITS
+        ]
+        return snapshot, summary
 
     def wait_for(
         self,
