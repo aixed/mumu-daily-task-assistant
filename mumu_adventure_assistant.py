@@ -158,6 +158,18 @@ ADVENTURE_CHEST_BLOCK = (560, 710, 700, 930)
 
 MAIN_CITY_TOGGLE_ICON_BLOCK = (600, 1145, 715, 1225)
 MAIN_CITY_TOGGLE_BLOCK = (575, 1125, 720, 1280)
+MAIN_AVATAR_FIXED_POINTS = [
+    ("头像左白", 4, 60, (255, 255, 255)),
+    ("头像右蓝", 97, 90, (86, 123, 176)),
+]
+MAIN_TOP_FIXED_POINTS = [
+    ("顶栏蓝", 112, 58, (172, 200, 223)),
+    ("顶栏黄", 441, 76, (250, 203, 72)),
+]
+MAIN_TOGGLE_FIXED_POINTS = [
+    ("切换金", 630, 1180, (249, 162, 26)),
+    ("底栏蓝", 600, 1230, NAV_BLUE),
+]
 
 ALLIANCE_NAV_BLOCKS = [
     (475, 1186, 493, 1214),
@@ -1079,6 +1091,15 @@ def relative_box_to_adb(box: tuple[float, float, float, float]) -> tuple[int, in
 DebugRange = tuple[str, str, tuple[int, int, int, int]]
 
 
+def debug_point_box(x: int, y: int, radius: int = 4) -> tuple[int, int, int, int]:
+    return (
+        max(0, x - radius),
+        max(0, y - radius),
+        min(ADB_REF_WIDTH, x + radius + 1),
+        min(ADB_REF_HEIGHT, y + radius + 1),
+    )
+
+
 @dataclass(frozen=True)
 class BuildingActionCandidate:
     center: tuple[int, int]
@@ -1096,10 +1117,14 @@ def debug_ranges_for_step(
     ranges: list[tuple[str, str, tuple[int, int, int, int]]] = []
 
     if step == "home":
-        return [
-            ("主界面返回", "#a78bfa", (0, 95, 75, 155)),
-            ("主城切换图标", "#f59e0b", MAIN_CITY_TOGGLE_ICON_BLOCK),
-        ]
+        for label, x, y, _target in MAIN_AVATAR_FIXED_POINTS:
+            ranges.append((label, "#a78bfa", debug_point_box(x, y)))
+        for label, x, y, _target in MAIN_TOP_FIXED_POINTS:
+            ranges.append((label, "#38bdf8", debug_point_box(x, y)))
+        for label, x, y, _target in MAIN_TOGGLE_FIXED_POINTS:
+            ranges.append((label, "#f59e0b", debug_point_box(x, y)))
+        ranges.append(("右下图形兜底", "#f59e0b", MAIN_CITY_TOGGLE_ICON_BLOCK))
+        return ranges
 
     if step == "explore_entry":
         for index, box in enumerate(EXPLORE_NAV_BLOCKS, start=1):
@@ -1197,7 +1222,23 @@ def queue_panel_visible(image: Image.Image) -> bool:
     return density >= 0.35 and known_rows >= 2
 
 
-def main_return_icon_visible(image: Image.Image) -> bool:
+def adb_fixed_point_visible(image: Image.Image, x: int, y: int, target: tuple[int, int, int]) -> bool:
+    rgb_image = image if image.mode == "RGB" else image.convert("RGB")
+    px, py = adb_point_to_image(image, x, y)
+    return rgb_image.getpixel((px, py)) == target
+
+
+def adb_fixed_point_hits(image: Image.Image, points: list[tuple[str, int, int, tuple[int, int, int]]]) -> int:
+    rgb_image = image if image.mode == "RGB" else image.convert("RGB")
+    hits = 0
+    for _label, x, y, target in points:
+        px, py = adb_point_to_image(rgb_image, x, y)
+        if rgb_image.getpixel((px, py)) == target:
+            hits += 1
+    return hits
+
+
+def legacy_main_return_icon_visible(image: Image.Image) -> bool:
     # Main map/city screens show a small rounded return icon below the avatar.
     # Regular subpages show a large back arrow at the very top-left instead.
     icon_box = adb_box(0, 95, 75, 155)
@@ -1213,21 +1254,39 @@ def main_return_icon_visible(image: Image.Image) -> bool:
     return white_density >= 0.06 and blue_density >= 0.08
 
 
+def main_avatar_frame_visible(image: Image.Image) -> bool:
+    if image.size != (ADB_REF_WIDTH, ADB_REF_HEIGHT):
+        return legacy_main_return_icon_visible(image)
+    return adb_fixed_point_hits(image, MAIN_AVATAR_FIXED_POINTS) == len(MAIN_AVATAR_FIXED_POINTS)
+
+
+def main_top_bar_anchor_visible(image: Image.Image) -> bool:
+    if image.size != (ADB_REF_WIDTH, ADB_REF_HEIGHT):
+        return True
+    return adb_fixed_point_hits(image, MAIN_TOP_FIXED_POINTS) == len(MAIN_TOP_FIXED_POINTS)
+
+
 def main_city_toggle_visible(image: Image.Image) -> bool:
     icon_white_ratio = adb_box_ratio(image, MAIN_CITY_TOGGLE_ICON_BLOCK, icon_white_pixel)
     icon_gold_ratio = adb_box_ratio(image, MAIN_CITY_TOGGLE_ICON_BLOCK, gold_brown_pixel)
     icon_nav_ratio = adb_box_ratio(image, MAIN_CITY_TOGGLE_ICON_BLOCK, nav_blue_pixel)
     block_nav_ratio = adb_box_ratio(image, MAIN_CITY_TOGGLE_BLOCK, nav_blue_pixel)
+    fixed_hits = (
+        adb_fixed_point_hits(image, MAIN_TOGGLE_FIXED_POINTS)
+        if image.size == (ADB_REF_WIDTH, ADB_REF_HEIGHT)
+        else 0
+    )
 
-    return (
+    legacy_visible = (
         icon_white_ratio >= 0.12
         and icon_gold_ratio >= 0.035
         and (icon_nav_ratio >= 0.10 or block_nav_ratio >= 0.22)
     )
+    return fixed_hits >= 2 or (fixed_hits >= 1 and legacy_visible)
 
 
 def main_screen_visible(image: Image.Image) -> bool:
-    return main_return_icon_visible(image) and main_city_toggle_visible(image)
+    return main_avatar_frame_visible(image) and main_top_bar_anchor_visible(image) and main_city_toggle_visible(image)
 
 
 def unit_upgrade_blocked_pixel(red: int, green: int, blue: int) -> bool:
@@ -2678,7 +2737,8 @@ class MultiPanelApp:
 
     def recover_home_after_timeout(self, window: TargetWindow, stop_event: threading.Event) -> None:
         self.thread_log(window, "尝试返回主界面后继续后续任务。")
-        for _ in range(8):
+        self.show_debug_step(window, "home")
+        for attempt in range(12):
             if stop_event.is_set():
                 return
             try:
@@ -2689,8 +2749,9 @@ class MultiPanelApp:
                     return
             except Exception as exc:
                 self.thread_log(window, f"恢复主界面时截图失败：{exc}")
+            self.thread_log(window, f"未确认主界面，第 {attempt + 1}/12 次点击左上角返回。")
             tap_target(window, "back")
-            time.sleep(0.45)
+            time.sleep(0.55)
         self.thread_log(window, "已尝试返回主界面，未能最终确认。")
 
     def task_handlers(self):
