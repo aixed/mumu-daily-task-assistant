@@ -36,9 +36,13 @@ except Exception:  # pragma: no cover - psutil is optional at runtime.
     psutil = None
 
 
-CONTROL_HEIGHT = 260
+CONTROL_HEIGHT = 305
 REFRESH_MS = 900
 TASK_BUFFER_SECONDS = 3
+TASK_STEP_TIMEOUT_SECONDS = 60
+AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS = 60
+AUTO_ASSIST_MIN_INTERVAL_SECONDS = 5
+AUTO_ASSIST_MAX_INTERVAL_SECONDS = 60
 ADB_REF_WIDTH = 720
 ADB_REF_HEIGHT = 1280
 
@@ -78,6 +82,7 @@ ADB_TAP_POINTS = {
     "soldier_building": (335, 705),
     "building_train": (480, 855),
     "soldier_train": (535, 1115),
+    "auto_assist": (545, 1092),
 }
 
 WINDOW_CLICK_POINTS = {
@@ -91,6 +96,7 @@ WINDOW_CLICK_POINTS = {
     "soldier_building": (0.465, 0.55),
     "building_train": (0.67, 0.67),
     "soldier_train": (0.74, 0.88),
+    "auto_assist": (0.76, 0.855),
 }
 
 DEBUG_DIR = Path("debug_captures")
@@ -98,6 +104,7 @@ DEBUG_DIR = Path("debug_captures")
 TASK_DEFINITIONS = [
     ("adventure", "探险领取"),
     ("train_soldiers", "训练士兵"),
+    ("auto_assist", "自动协助"),
 ]
 
 TRAIN_UNITS = [
@@ -151,6 +158,20 @@ ADVENTURE_CHEST_BLOCK = (560, 710, 700, 930)
 
 MAIN_CITY_TOGGLE_ICON_BLOCK = (600, 1145, 715, 1225)
 MAIN_CITY_TOGGLE_BLOCK = (575, 1125, 720, 1280)
+
+ALLIANCE_NAV_BLOCKS = [
+    (475, 1186, 493, 1214),
+    (550, 1186, 568, 1214),
+    (476, 1230, 493, 1256),
+    (550, 1230, 568, 1256),
+]
+ALLIANCE_ICON_BLOCKS = [
+    (505, 1168, 550, 1208),
+    (515, 1190, 550, 1220),
+]
+AUTO_ASSIST_BUBBLE_BLOCK = (492, 1035, 608, 1145)
+AUTO_ASSIST_GREEN_BLOCK = (510, 1075, 570, 1130)
+AUTO_ASSIST_HAND_BLOCK = (522, 1082, 572, 1118)
 
 SIDE_CLAIM_GREEN_BLOCKS = [
     (560, 820, 680, 860),
@@ -954,6 +975,49 @@ def explore_tab_visible(image: Image.Image, profile: ScreenProfile) -> bool:
     return nav_hits >= 3 and sword_hits >= 3
 
 
+def auto_assist_green_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        20 <= red <= 125
+        and 120 <= green <= 230
+        and 25 <= blue <= 150
+        and green >= red + 45
+        and green >= blue + 35
+    )
+
+
+def auto_assist_hand_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        150 <= red <= 245
+        and 80 <= green <= 185
+        and 45 <= blue <= 150
+        and red >= green + 25
+        and green >= blue + 15
+    )
+
+
+def alliance_tab_visible(image: Image.Image, profile: ScreenProfile = ADB_PROFILE) -> bool:
+    if profile is not ADB_PROFILE:
+        profile = ADB_PROFILE
+
+    nav_hits = 0
+    for box in ALLIANCE_NAV_BLOCKS:
+        if adb_box_ratio(image, box, nav_blue_pixel) >= 0.68 or adb_box_average_near(image, box, NAV_BLUE, 28):
+            nav_hits += 1
+
+    icon_hits = adb_color_block_hits(image, ALLIANCE_ICON_BLOCKS, icon_white_pixel, 0.22)
+    return nav_hits >= 3 and icon_hits >= 1
+
+
+def auto_assist_handshake_visible(image: Image.Image, profile: ScreenProfile = ADB_PROFILE) -> bool:
+    if not alliance_tab_visible(image, profile):
+        return False
+
+    green_ratio = adb_box_ratio(image, AUTO_ASSIST_GREEN_BLOCK, auto_assist_green_pixel)
+    hand_ratio = adb_box_ratio(image, AUTO_ASSIST_HAND_BLOCK, auto_assist_hand_pixel)
+    bubble_white_ratio = adb_box_ratio(image, AUTO_ASSIST_BUBBLE_BLOCK, icon_white_pixel)
+    return green_ratio >= 0.055 and hand_ratio >= 0.045 and bubble_white_ratio >= 0.16
+
+
 def adventure_page_visible(image: Image.Image, profile: ScreenProfile) -> bool:
     if profile is not ADB_PROFILE:
         return adventure_header_density(image, profile.adventure_header_box) >= 0.30
@@ -1042,6 +1106,16 @@ def debug_ranges_for_step(
             ranges.append((f"探险底色{index}", "#38bdf8", box))
         for index, box in enumerate(EXPLORE_SWORD_BLOCKS, start=1):
             ranges.append((f"双剑白边{index}", "#facc15", box))
+        return ranges
+
+    if step == "auto_assist":
+        for index, box in enumerate(ALLIANCE_NAV_BLOCKS, start=1):
+            ranges.append((f"联盟底色{index}", "#38bdf8", box))
+        for index, box in enumerate(ALLIANCE_ICON_BLOCKS, start=1):
+            ranges.append((f"联盟图形{index}", "#facc15", box))
+        ranges.append(("协助白框", "#e879f9", AUTO_ASSIST_BUBBLE_BLOCK))
+        ranges.append(("协助绿底", "#22c55e", AUTO_ASSIST_GREEN_BLOCK))
+        ranges.append(("握手图形", "#fb923c", AUTO_ASSIST_HAND_BLOCK))
         return ranges
 
     if step == "adventure_page":
@@ -2124,6 +2198,8 @@ class TargetPanel:
         self.stop_btn: tk.Button | None = None
         self.debug_ranges_var = tk.BooleanVar(master=root, value=False)
         self.debug_check: tk.Checkbutton | None = None
+        self.assist_interval_var = tk.IntVar(master=root, value=AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS)
+        self.assist_interval_spin: tk.Spinbox | None = None
         self.debug_overlay: DebugRangeOverlay | None = None
         self.debug_ranges: list[DebugRange] = debug_ranges_for_step("home")
 
@@ -2217,6 +2293,40 @@ class TargetPanel:
             check.grid(row=index, column=0, sticky="ew", padx=(0, 8), pady=3)
             self.task_vars[task_key] = var
             self.task_checks[task_key] = check
+
+        interval_frame = tk.Frame(tasks, bg="#1f2937")
+        interval_frame.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=3)
+        interval_frame.columnconfigure(1, weight=1)
+        interval_label = tk.Label(
+            interval_frame,
+            text="协助间隔",
+            bg="#1f2937",
+            fg="#d1d5db",
+            font=("Microsoft YaHei UI", 9),
+        )
+        interval_label.grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.assist_interval_spin = tk.Spinbox(
+            interval_frame,
+            from_=AUTO_ASSIST_MIN_INTERVAL_SECONDS,
+            to=AUTO_ASSIST_MAX_INTERVAL_SECONDS,
+            increment=5,
+            textvariable=self.assist_interval_var,
+            width=5,
+            justify="center",
+            bg="#111827",
+            fg="#f9fafb",
+            buttonbackground="#374151",
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.assist_interval_spin.grid(row=0, column=1, sticky="ew")
+        interval_unit = tk.Label(
+            interval_frame,
+            text="秒",
+            bg="#1f2937",
+            fg="#9ca3af",
+            font=("Microsoft YaHei UI", 9),
+        )
+        interval_unit.grid(row=0, column=2, sticky="e", padx=(6, 0))
 
         self.debug_check = tk.Checkbutton(
             tasks,
@@ -2321,6 +2431,8 @@ class TargetPanel:
         state = "disabled" if busy else "normal"
         if self.start_btn is not None:
             self.start_btn.configure(state=state)
+        if self.assist_interval_spin is not None:
+            self.assist_interval_spin.configure(state=state)
         for check in self.task_checks.values():
             check.configure(state=state)
 
@@ -2352,6 +2464,15 @@ class TargetPanel:
     def selected_tasks(self) -> list[str]:
         return [key for key, _label in TASK_DEFINITIONS if self.task_vars[key].get()]
 
+    def assist_interval_seconds(self) -> int:
+        try:
+            value = int(self.assist_interval_var.get())
+        except (tk.TclError, ValueError):
+            value = AUTO_ASSIST_DEFAULT_INTERVAL_SECONDS
+        value = max(AUTO_ASSIST_MIN_INTERVAL_SECONDS, min(AUTO_ASSIST_MAX_INTERVAL_SECONDS, value))
+        self.assist_interval_var.set(value)
+        return value
+
     def reset_task_states(self) -> None:
         for check in self.task_checks.values():
             check.configure(fg="#d1d5db", activeforeground="#ffffff")
@@ -2373,6 +2494,11 @@ class MultiPanelApp:
         self.panels: dict[int, TargetPanel] = {}
         self.workers: dict[int, threading.Thread] = {}
         self.stop_events: dict[int, threading.Event] = {}
+        self.timeout_events: dict[int, threading.Event] = {}
+        self.watchdogs: dict[int, threading.Thread] = {}
+        self.current_tasks: dict[int, str] = {}
+        self.step_started_at: dict[int, float] = {}
+        self.step_signatures: dict[int, str] = {}
 
         self.refresh_targets(force=True)
         self.follow_targets()
@@ -2417,10 +2543,11 @@ class MultiPanelApp:
         if not task_keys:
             panel.log("未勾选任务。")
             return
+        assist_interval = panel.assist_interval_seconds()
         panel.reset_task_states()
-        self.start_worker(panel, task_keys)
+        self.start_worker(panel, task_keys, assist_interval)
 
-    def start_worker(self, panel: TargetPanel, task_keys: list[str]) -> None:
+    def start_worker(self, panel: TargetPanel, task_keys: list[str], assist_interval: int) -> None:
         hwnd = panel.window.hwnd
         existing_worker = self.workers.get(hwnd)
         if existing_worker and existing_worker.is_alive():
@@ -2428,9 +2555,23 @@ class MultiPanelApp:
             return
         panel.set_busy(True)
         stop_event = threading.Event()
+        timeout_event = threading.Event()
         self.stop_events[hwnd] = stop_event
-        worker = threading.Thread(target=self.worker_main, args=(panel.window, task_keys, stop_event), daemon=True)
+        self.timeout_events[hwnd] = timeout_event
+        worker = threading.Thread(
+            target=self.worker_main,
+            args=(panel.window, task_keys, stop_event, timeout_event, assist_interval),
+            daemon=True,
+        )
+        watchdog = threading.Thread(
+            target=self.watchdog_main,
+            args=(panel.window, stop_event, timeout_event),
+            daemon=True,
+        )
         self.workers[hwnd] = worker
+        self.watchdogs[hwnd] = watchdog
+        self.clear_current_task(panel.window)
+        watchdog.start()
         worker.start()
 
     def stop_all_tasks(self) -> None:
@@ -2463,6 +2604,7 @@ class MultiPanelApp:
         unit_label: str = "",
         row_y: int | None = None,
     ) -> None:
+        self.note_task_step(window, step, unit_label=unit_label, row_y=row_y)
         ranges = debug_ranges_for_step(step, unit_label=unit_label, row_y=row_y)
 
         def _show() -> None:
@@ -2474,7 +2616,8 @@ class MultiPanelApp:
 
     def should_stop(self, window: TargetWindow) -> bool:
         event = self.stop_events.get(window.hwnd)
-        return bool(event and event.is_set())
+        timeout_event = self.timeout_events.get(window.hwnd)
+        return bool((event and event.is_set()) or (timeout_event and timeout_event.is_set()))
 
     def sleep_with_stop(self, window: TargetWindow, seconds: float) -> bool:
         end_time = time.monotonic() + seconds
@@ -2487,42 +2630,209 @@ class MultiPanelApp:
             time.sleep(min(0.1, remaining))
         return not self.should_stop(window)
 
-    def worker_main(self, window: TargetWindow, task_keys: list[str], stop_event: threading.Event) -> None:
-        task_labels = dict(TASK_DEFINITIONS)
-        handlers = {
+    def note_task_step(
+        self,
+        window: TargetWindow,
+        step: str,
+        unit_label: str = "",
+        row_y: int | None = None,
+        force: bool = False,
+    ) -> None:
+        hwnd = window.hwnd
+        signature = f"{step}:{unit_label}:{row_y}"
+        if force or self.step_signatures.get(hwnd) != signature:
+            self.step_signatures[hwnd] = signature
+            self.step_started_at[hwnd] = time.monotonic()
+
+    def clear_current_task(self, window: TargetWindow) -> None:
+        hwnd = window.hwnd
+        self.current_tasks.pop(hwnd, None)
+        self.note_task_step(window, "idle", force=True)
+
+    def watchdog_main(
+        self,
+        window: TargetWindow,
+        stop_event: threading.Event,
+        timeout_event: threading.Event,
+    ) -> None:
+        hwnd = window.hwnd
+        while not stop_event.is_set():
+            time.sleep(1.0)
+            if timeout_event.is_set():
+                continue
+            task_key = self.current_tasks.get(hwnd)
+            if not task_key:
+                continue
+            started_at = self.step_started_at.get(hwnd)
+            if started_at is None:
+                continue
+            elapsed = time.monotonic() - started_at
+            if elapsed < TASK_STEP_TIMEOUT_SECONDS:
+                continue
+            timeout_event.set()
+            step = self.step_signatures.get(hwnd, "unknown")
+            self.thread_log(
+                window,
+                f"当前步骤超过 {TASK_STEP_TIMEOUT_SECONDS} 秒，强制停止本任务：{task_key} / {step}。",
+            )
+
+    def recover_home_after_timeout(self, window: TargetWindow, stop_event: threading.Event) -> None:
+        self.thread_log(window, "尝试返回主界面后继续后续任务。")
+        for _ in range(8):
+            if stop_event.is_set():
+                return
+            try:
+                image, _profile = capture_target(window)
+                detection = analyze_screen(image, ADB_PROFILE)
+                if main_screen_visible(image) and not detection.adventure_page_visible and not detection.reward_overlay_visible:
+                    self.thread_log(window, "已恢复到主界面。")
+                    return
+            except Exception as exc:
+                self.thread_log(window, f"恢复主界面时截图失败：{exc}")
+            tap_target(window, "back")
+            time.sleep(0.45)
+        self.thread_log(window, "已尝试返回主界面，未能最终确认。")
+
+    def task_handlers(self):
+        return {
             "adventure": self.task_adventure,
             "train_soldiers": self.task_train_soldiers,
+            "auto_assist": self.task_auto_assist,
         }
+
+    def run_one_task(
+        self,
+        window: TargetWindow,
+        task_key: str,
+        task_label: str,
+        handler,
+        stop_event: threading.Event,
+        timeout_event: threading.Event,
+        index: int,
+        total: int,
+    ) -> str:
+        if stop_event.is_set():
+            self.thread_log(window, "任务已停止。")
+            return "stopped"
+
+        self.current_tasks[window.hwnd] = task_key
+        self.note_task_step(window, f"task:{task_key}", force=True)
+        self.thread_log(window, f"开始任务 {index}/{total}：{task_label}")
+        ok = handler(window)
+        self.clear_current_task(window)
+
+        if timeout_event.is_set():
+            self.thread_log(window, f"任务超时：{task_label}，本轮停止并恢复主界面。")
+            self.recover_home_after_timeout(window, stop_event)
+            timeout_event.clear()
+            return "timeout"
+
+        if stop_event.is_set():
+            self.thread_log(window, "任务已停止。")
+            return "stopped"
+
+        if not ok:
+            self.thread_log(window, f"任务未完成：{task_label}")
+            return "failed"
+
+        self.root.after(0, lambda key=task_key, hwnd=window.hwnd: self.mark_task_done(hwnd, key))
+        return "ok"
+
+    def run_task_sequence(
+        self,
+        window: TargetWindow,
+        task_keys: list[str],
+        task_labels: dict[str, str],
+        handlers: dict,
+        stop_event: threading.Event,
+        timeout_event: threading.Event,
+    ) -> bool:
+        total = len(task_keys)
+        for index, task_key in enumerate(task_keys, start=1):
+            handler = handlers.get(task_key)
+            task_label = task_labels.get(task_key, task_key)
+            if handler is None:
+                self.thread_log(window, f"任务未实现：{task_label}")
+                continue
+
+            result = self.run_one_task(
+                window,
+                task_key,
+                task_label,
+                handler,
+                stop_event,
+                timeout_event,
+                index,
+                total,
+            )
+            if result == "stopped":
+                return False
+            if result == "failed":
+                return False
+            if index < total:
+                self.thread_log(window, f"{task_label} 已结束，等待 {TASK_BUFFER_SECONDS} 秒后继续。")
+                if not self.sleep_with_stop(window, TASK_BUFFER_SECONDS):
+                    self.thread_log(window, "任务已停止。")
+                    return False
+        return True
+
+    def worker_main(
+        self,
+        window: TargetWindow,
+        task_keys: list[str],
+        stop_event: threading.Event,
+        timeout_event: threading.Event,
+        assist_interval: int,
+    ) -> None:
+        task_labels = dict(TASK_DEFINITIONS)
+        handlers = self.task_handlers()
+        auto_assist_enabled = "auto_assist" in task_keys
         try:
-            for index, task_key in enumerate(task_keys, start=1):
-                if stop_event.is_set():
+            initial_ok = self.run_task_sequence(
+                window,
+                task_keys,
+                task_labels,
+                handlers,
+                stop_event,
+                timeout_event,
+            )
+            if not initial_ok or stop_event.is_set():
+                return
+
+            while auto_assist_enabled and not stop_event.is_set():
+                self.clear_current_task(window)
+                self.thread_log(window, f"自动协助将在 {assist_interval} 秒后再次检测。")
+                if not self.sleep_with_stop(window, assist_interval):
                     self.thread_log(window, "任务已停止。")
                     break
 
-                task_label = task_labels.get(task_key, task_key)
-                handler = handlers.get(task_key)
-                if handler is None:
-                    self.thread_log(window, f"任务未实现：{task_label}")
-                    continue
-
-                self.thread_log(window, f"开始任务 {index}/{len(task_keys)}：{task_label}")
-                ok = handler(window)
-                if not ok:
-                    self.thread_log(window, f"任务未完成：{task_label}")
+                handler = handlers["auto_assist"]
+                result = self.run_one_task(
+                    window,
+                    "auto_assist",
+                    task_labels["auto_assist"],
+                    handler,
+                    stop_event,
+                    timeout_event,
+                    1,
+                    1,
+                )
+                if result == "stopped":
                     break
-
-                self.root.after(0, lambda key=task_key, hwnd=window.hwnd: self.mark_task_done(hwnd, key))
-                if index < len(task_keys):
-                    self.thread_log(window, f"{task_label} 已完成，等待 {TASK_BUFFER_SECONDS} 秒后继续。")
-                    if not self.sleep_with_stop(window, TASK_BUFFER_SECONDS):
-                        self.thread_log(window, "任务已停止。")
-                        break
+                if result == "failed":
+                    self.thread_log(window, "自动协助本轮未完成，等待下次检测。")
+                    self.recover_home_after_timeout(window, stop_event)
         except Exception as exc:
             traceback.print_exc()
             self.thread_log(window, f"执行失败：{exc}")
         finally:
             self.workers.pop(window.hwnd, None)
             self.stop_events.pop(window.hwnd, None)
+            self.timeout_events.pop(window.hwnd, None)
+            self.watchdogs.pop(window.hwnd, None)
+            self.current_tasks.pop(window.hwnd, None)
+            self.step_started_at.pop(window.hwnd, None)
+            self.step_signatures.pop(window.hwnd, None)
             self.show_debug_step(window, "home")
             self.root.after(0, lambda hwnd=window.hwnd: self.set_panel_busy(hwnd, False))
 
@@ -2856,6 +3166,51 @@ class MultiPanelApp:
             attempts=10,
         )
         return ok
+
+    def task_auto_assist(self, window: TargetWindow) -> bool:
+        if not is_alive_window(window.hwnd):
+            self.thread_log(window, "目标窗口已关闭，跳过。")
+            return False
+        if not self.ensure_home_screen(window):
+            return False
+        if self.should_stop(window):
+            self.thread_log(window, "任务已停止。")
+            return False
+
+        self.show_debug_step(window, "auto_assist")
+        image, profile = capture_target(window)
+        if not alliance_tab_visible(image, profile):
+            self.thread_log(window, "未识别到底部联盟图形，跳过自动协助。")
+            return True
+        if not auto_assist_handshake_visible(image, profile):
+            self.thread_log(window, "未出现联盟协助握手，跳过本次检测。")
+            return True
+
+        for attempt in range(1, 3):
+            if self.should_stop(window):
+                self.thread_log(window, "任务已停止。")
+                return False
+            self.thread_log(window, f"识别到联盟协助握手，点击处理（第 {attempt}/2 次）。")
+            tap_target(window, "auto_assist")
+            ok, image = self.wait_for_image(
+                window,
+                lambda img: not auto_assist_handshake_visible(img, ADB_PROFILE),
+                "联盟协助握手已消失，本次协助完成。",
+                "点击后仍检测到联盟协助握手。",
+                attempts=8,
+                interval=0.35,
+            )
+            if ok:
+                if not self.ensure_home_screen(window):
+                    return False
+                self.show_debug_step(window, "auto_assist")
+                image, profile = capture_target(window)
+                if not auto_assist_handshake_visible(image, profile):
+                    return True
+                self.thread_log(window, "返回主界面后仍检测到协助握手，准备重试。")
+
+        self.thread_log(window, "自动协助点击后未通过消失验证。")
+        return False
 
     def task_adventure(self, window: TargetWindow) -> bool:
         if not is_alive_window(window.hwnd):
