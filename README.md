@@ -1,5 +1,5 @@
 # MuMu 探险助手
-
+tg群：https://t.me/+JxudnffhGRk1Njg1
 这是一个纯 Python 小工具，用于附加在 MuMu 模拟器目标窗口上方，并由你主动点击按钮后执行勾选的任务。
 
 ## 运行
